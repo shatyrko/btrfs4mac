@@ -9,8 +9,6 @@ A macOS menu bar app with two jobs.
 
 It works with **any external drive**, whatever the make: the drive is found automatically (see "Choosing the drive"). The keep-alive helps any drive that spins down or powers off when idle.
 
-*Formerly called G-Drive.*
-
 ## What it does
 
 - **One-click unlock and mount.** Finds the drive, asks for the LUKS passphrase (optionally remembers it in the Keychain), mounts the volume, opens Finder.

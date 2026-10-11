@@ -258,8 +258,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             addBtrfsMenu(to: menu)
             addHeaderMenu(to: menu)
             menu.addItem(.separator())
-            add(to: menu, keepAliveEnabled ? "Keep-alive on" : "Keep-alive off",
-                icon: keepAliveEnabled ? "heart.fill" : "heart.slash", #selector(toggleKeepAlive))
+            let keep = add(to: menu, "Keep Drive Awake", icon: "heart.fill", #selector(toggleKeepAlive),
+                           tip: "Writes a few bytes every \(Int(Config.keepAliveInterval)) s so the drive never idles; on by default")
+            keep.state = keepAliveEnabled ? .on : .off
             let status = keepAliveStatus()
             add(to: menu, status.text, icon: status.ok ? "checkmark.circle" : "exclamationmark.triangle",
                 tip: status.tip)

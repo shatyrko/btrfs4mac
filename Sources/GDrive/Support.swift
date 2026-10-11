@@ -3,9 +3,11 @@ import Security
 
 enum Config {
     /// Media name macOS reports for the enclosure (`diskutil info` → "Device / Media Name").
-    static let diskName = "G-DRIVE"
-    /// Where anylinuxfs mounts the Btrfs volume.
-    static let mountPoint = "/Volumes/backup"
+    /// Override with: defaults write local.g-drive diskName "My Drive"
+    static var diskName: String { UserDefaults.standard.string(forKey: "diskName") ?? "G-DRIVE" }
+    /// Name of the Btrfs volume (its label); anylinuxfs mounts it at /Volumes/<label>.
+    /// Override with: defaults write local.g-drive volumeName "mylabel"
+    static var mountPoint: String { "/Volumes/" + (UserDefaults.standard.string(forKey: "volumeName") ?? "backup") }
     static let anylinuxfs = "/opt/homebrew/bin/anylinuxfs"
     static let keepAliveInterval: TimeInterval = 20
     static let keepAliveFile = ".g-drive-keepalive"

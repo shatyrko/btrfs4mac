@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var btrfsInfo: BtrfsInfo?
     private weak var btrfsCard: BtrfsView?
     private var btrfsTimer: Timer?
+    private var subvolumeSizes: [String: Double] = [:]
+    private var sizesPaths: [String] = []
+    private var sizesFetchedAt: Date?
+    private var sizesBusy = false
     private let scrubRun = ScrubRun()
     private var scrubStartRead: UInt64?
     private var scrubTotal: Double?
@@ -216,7 +220,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func addBtrfsMenu(to menu: NSMenu) {
-        let sub = addSubmenu(to: menu, "Btrfs", icon: "square.stack.3d.up.fill")
         let card = BtrfsView()
         // Buttons act once the menu has closed, so dialogs and Finder windows are not left behind it.
         func later(_ work: @escaping () -> Void) {
@@ -230,13 +233,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             snapshotAll: { later { [weak self] in self?.runSnapshot(only: nil) } },
             openSnapshot: { name in later { [weak self] in self?.openSnapshot(name) } },
             deleteSnapshot: { name in later { [weak self] in self?.confirmDeleteSnapshot(name) } },
-            toggleScrub: { later { [weak self] in self?.toggleScrub() } }
+            toggleScrub: { later { [weak self] in self?.toggleScrub() } },
+            refreshSizes: { [weak self] in self?.sizesFetchedAt = nil; self?.reloadBtrfs() }
         )
         card.update(btrfsInfo)
         btrfsCard = card
         let item = NSMenuItem()
         item.view = card
-        sub.addItem(item)
+        menu.addItem(item)
     }
 
     @discardableResult
@@ -458,6 +462,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 guard var info else { return }
                 self.applyScrub(to: &info)
+                self.refreshSizesIfNeeded(info.subvolumes)
+                info.sizes = self.subvolumeSizes
+                info.sizesBusy = self.sizesBusy
                 self.btrfsInfo = info
                 self.btrfsCard?.update(info)
                 self.dashboard?.data = self.dashboardData()
@@ -521,6 +528,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.reloadBtrfs()
                 if result.status != 0 { self.show("Could not delete the snapshot", result.output) }
+            }
+        }
+    }
+
+    /// Subvolume sizes are slow to count on a big tree, so they are cached and recounted every ten minutes,
+    /// when the list of subvolumes changes, or on request.
+    private func refreshSizesIfNeeded(_ paths: [String]) {
+        guard !paths.isEmpty, !sizesBusy else { return }
+        let stale = sizesFetchedAt.map { Date().timeIntervalSince($0) > 600 } ?? true
+        guard stale || Set(paths) != Set(sizesPaths) else { return }
+        sizesBusy = true
+        DispatchQueue.global().async {
+            let sizes = fetchSubvolumeSizes(paths)
+            DispatchQueue.main.async {
+                self.subvolumeSizes = sizes
+                self.sizesPaths = paths
+                self.sizesFetchedAt = Date()
+                self.sizesBusy = false
+                self.reloadBtrfs()
             }
         }
     }

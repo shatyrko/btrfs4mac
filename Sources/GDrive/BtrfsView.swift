@@ -33,9 +33,10 @@ final class BtrfsView: NSView {
         var openSnapshot: (String) -> Void = { _ in }
         var deleteSnapshot: (String) -> Void = { _ in }
         var toggleScrub: () -> Void = {}
+        var refreshSizes: () -> Void = {}
     }
 
-    static let width: CGFloat = 340
+    static let width: CGFloat = 330
     private let maxSnapshots = 6
 
     var actions = Actions()
@@ -70,7 +71,9 @@ final class BtrfsView: NSView {
 
     func update(_ info: BtrfsInfo?) {
         self.info = info
-        let sig = ((info?.subvolumes ?? []) + ["|"] + (info?.snapshots ?? [])).joined(separator: "\n") + "\(info == nil)"
+        let sizes = (info?.sizes ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\(Int($0.value))" }
+        let sig = ((info?.subvolumes ?? []) + ["|"] + (info?.snapshots ?? []) + ["|"] + sizes).joined(separator: "\n")
+            + "\(info == nil)\(info?.sizesBusy ?? false)"
         if sig != signature {
             signature = sig
             rebuild()
@@ -99,12 +102,16 @@ final class BtrfsView: NSView {
         }
 
         // Subvolumes
-        add(sectionHeader("SUBVOLUMES", button: button("plus.circle.fill", "New subvolume") { [weak self] in self?.actions.newSubvolume() }))
+        add(sectionHeader("SUBVOLUMES", buttons: [
+            button("arrow.clockwise", "Recalculate the sizes") { [weak self] in self?.actions.refreshSizes() },
+            button("plus.circle.fill", "New subvolume") { [weak self] in self?.actions.newSubvolume() }
+        ]))
         if info.subvolumes.isEmpty {
             add(label("None yet. Create one with +", size: 12, color: .secondaryLabelColor))
         }
         for path in info.subvolumes {
-            add(row(icon: "folder.fill", tint: NSColor.systemBlue, title: path, subtitle: nil, buttons: [
+            let size = info.sizes[path].map { formatBytes($0) } ?? (info.sizesBusy ? "calculating…" : "size unknown")
+            add(row(icon: "folder.fill", tint: NSColor.systemBlue, title: path, subtitle: size, buttons: [
                 button("folder", "Open in Finder") { [weak self] in self?.actions.openSubvolume(path) },
                 button("camera.fill", "Take a snapshot of \(path)") { [weak self] in self?.actions.snapshotSubvolume(path) }
             ]))
@@ -112,9 +119,9 @@ final class BtrfsView: NSView {
         add(divider())
 
         // Snapshots
-        add(sectionHeader("SNAPSHOTS", button: button("camera.on.rectangle.fill", "Snapshot everything") { [weak self] in
+        add(sectionHeader("SNAPSHOTS", buttons: [button("camera.on.rectangle.fill", "Snapshot everything") { [weak self] in
             self?.actions.snapshotAll()
-        }))
+        }]))
         if info.snapshots.isEmpty {
             add(label("None yet", size: 12, color: .secondaryLabelColor))
         }
@@ -133,7 +140,7 @@ final class BtrfsView: NSView {
         // Data check
         let scrub = button("play.circle.fill", "") { [weak self] in self?.actions.toggleScrub() }
         scrubButton = scrub
-        add(sectionHeader("DATA CHECK", button: scrub))
+        add(sectionHeader("DATA CHECK", buttons: [scrub]))
         scrubLabel.font = .systemFont(ofSize: 12)
         scrubLabel.textColor = .labelColor
         scrubLabel.lineBreakMode = .byTruncatingTail
@@ -182,10 +189,10 @@ final class BtrfsView: NSView {
         return b
     }
 
-    private func sectionHeader(_ title: String, button: NSButton) -> NSView {
+    private func sectionHeader(_ title: String, buttons: [NSButton]) -> NSView {
         let text = label(title, size: 10, weight: .semibold, color: .secondaryLabelColor)
         text.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let row = NSStackView(views: [text, button])
+        let row = NSStackView(views: [text] + buttons)
         row.orientation = .horizontal
         row.alignment = .centerY
         row.distribution = .fill

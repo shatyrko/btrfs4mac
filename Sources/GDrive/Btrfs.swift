@@ -20,6 +20,9 @@ struct BtrfsInfo {
     var scrubPercent: Double?
     var snapshots: [String] = []
     var subvolumes: [String] = []
+    /// Bytes per subvolume, from `btrfs filesystem du`; filled in by the app, which caches it.
+    var sizes: [String: Double] = [:]
+    var sizesBusy = false
 }
 
 func fetchBtrfsInfo() -> BtrfsInfo? {
@@ -184,4 +187,20 @@ func spaceNumbers() -> (size: Double, free: Double)? {
     var info = statfs()
     guard statfs(Config.mountPoint, &info) == 0 else { return nil }
     return (Double(info.f_blocks) * Double(info.f_bsize), Double(info.f_bavail) * Double(info.f_bsize))
+}
+
+/// Size in bytes of each subvolume (`btrfs filesystem du -s --raw`, which counts the files it holds).
+func fetchSubvolumeSizes(_ paths: [String]) -> [String: Double] {
+    guard !paths.isEmpty else { return [:] }
+    let script = "for p in \"$@\"; do echo \"@@$p\"; \(btrfs) filesystem du -s --raw \"\(vmMountPoint)/$p\"; done"
+    let result = vmExec(["sh", "-c", script, "sh"] + paths)
+    var sizes: [String: Double] = [:]
+    var current: String?
+    for line in result.output.split(separator: "\n") {
+        if line.hasPrefix("@@") { current = String(line.dropFirst(2)); continue }
+        // the data line is "<total> <exclusive> <shared> <path>"; the header line starts with "Total"
+        let fields = line.split(separator: " ")
+        if let current, fields.count >= 4, let total = Double(fields[0]) { sizes[current] = total }
+    }
+    return sizes
 }

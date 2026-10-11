@@ -2,9 +2,12 @@
 
 <img src="docs/icon.png" width="96" align="right" alt="G-Drive icon">
 
-A macOS menu bar app for an external drive that is **Btrfs on LUKS2**. macOS cannot read that combination, so G-Drive drives [anylinuxfs](https://github.com/nohajc/anylinuxfs) (a small Linux VM) for you: plug the drive in, start the app, type the passphrase, and the volume is mounted, writable, in Finder.
+A macOS menu bar app with two jobs.
 
-It was written for a SanDisk Professional G-DRIVE 22 TB, but nothing in it is specific to that model: the drive and volume names are settings.
+1. **Btrfs and LUKS encryption on external drives.** macOS reads neither. G-Drive drives [anylinuxfs](https://github.com/nohajc/anylinuxfs), a small Linux VM, so a **Btrfs-on-LUKS2** drive mounts read-write in Finder: plug the drive in, start the app, type the passphrase. On top of that it adds what Btrfs is good for: snapshots, subvolumes with their sizes, a data scrub and health counters.
+2. **Keeping a drive that powers itself off alive.** Some enclosures cut their own power after about a minute without traffic, and the mounted volume dies with them. This was written for a SanDisk Professional G-DRIVE 22 TB that behaves exactly like that. While the volume is mounted the app writes and syncs a few bytes every 20 seconds, so the drive never idles.
+
+It works with **any external drive**, whatever the make: the drive is found by its name, and both the drive name and the volume label are settings (see "Point it at your drive"). The keep-alive helps any drive that spins down or powers off when idle.
 
 ## What it does
 
@@ -12,7 +15,7 @@ It was written for a SanDisk Professional G-DRIVE 22 TB, but nothing in it is sp
 - **One-click eject.** "Eject Drive and Quit" unmounts, stops the VM, ejects the drive and quits, leaving no `anylinuxfs`, `vmnet-helper` or `gvproxy` process behind.
 - **Keep the drive awake.** Many USB drives power themselves off after a minute or so of idle, which kills a mounted volume. While mounted, the app writes and syncs a few bytes every 20 seconds so the drive never idles.
 - **Live dashboard** at the top of the menu: used/free space bar, a 60-second read/write throughput graph with the current rates, a health badge (`btrfs device stats`), and the bytes written and read.
-- **Btrfs card:** subvolumes (open, create, snapshot one) and snapshots (open, delete, snapshot everything) as rows with buttons, plus a scrub (full checksum check of all data) with an estimated progress bar and the result of the last run.
+- **Btrfs card** in the main menu: every subvolume with its size (open, create, snapshot one) and snapshots (open, delete, snapshot everything) as rows with buttons, plus a scrub (full checksum check of all data) with an estimated progress bar and the result of the last run.
 - **LUKS header backup and verify.** Saves the LUKS header to a file you choose and compares a saved file with the drive later.
 - **Recovers from a dropped drive.** If the drive comes back under a new disk name, the dead mount is cleared and the app asks again.
 - **About** shows the app and anylinuxfs versions and tells you when a newer anylinuxfs release exists.
@@ -66,7 +69,7 @@ Restart the app afterwards. The keep-alive interval and the anylinuxfs path are 
 | --- | --- |
 | Drive not plugged in | status only |
 | Locked | Unlock and Mount…, LUKS Header, Eject Drive |
-| Mounted | dashboard, Open in Finder, Lock, Lock and Eject Drive, Btrfs, Keep Drive Awake with its LUKS Header submenu, About, Eject Drive and Quit |
+| Mounted | dashboard, Open in Finder, Lock, Lock and Eject Drive, the Btrfs card (subvolumes with sizes, snapshots, data check), Keep Drive Awake with its LUKS Header submenu, About, Eject Drive and Quit |
 
 Flow: plug the drive in, start the app. It asks for the passphrase at once, mounts the volume and opens Finder. While data moves, the menu bar icon shows ↑ (writing), ↓ (reading) or ↕.
 
@@ -87,11 +90,24 @@ Flow: plug the drive in, start the app. It asks for the passphrase at once, moun
 - A header backup plus an old passphrase unlocks the drive. Keep the file private, and off the drive itself (the app refuses to save it there).
 - "Remember in Keychain" stores the passphrase in your login keychain (item `g-drive.luks`). Anyone logged in as you with the keychain unlocked can then open the drive. It is off unless you tick it; "Forget Saved Passphrase" removes it.
 - The Mac password is only ever typed into the system dialog that `sudo` shows; the app does not see or store it.
-- The app's only network access is the update check against `api.github.com` (at start and every 12 hours). anylinuxfs talks to its VM over a local virtual network.
+- The app's own network access is a single update check; everything else is local. See "Network access" below.
+
+## Network access
+
+If you run a firewall (Little Snitch, LuLu, …) it will ask about these. What each one is and whether you can refuse it:
+
+| Connection | Made by | Why | Can you block it? |
+| --- | --- | --- | --- |
+| `api.github.com`, HTTPS | G-Drive | Update check: one request for the latest anylinuxfs release, at start and every 12 hours. Sends nothing but a generic `User-Agent: g-drive`. | **Yes.** Everything works without it; you only lose the "Update available" notice. |
+| Virtual network `172.27.1.0/30` | anylinuxfs (`vmnet-helper`, or `gvproxy`) | A private network between your Mac and the Linux VM that reads the drive. | No: it is how the volume reaches Finder. It never leaves the Mac. |
+| NFS to `172.27.1.2`, ports 111, 2049, 32765, 32767 (TCP and UDP) | macOS NFS client → the VM | The volume is served by the VM as an NFS share and mounted at `/Volumes/<label>` (anylinuxfs' own documentation: by default it is reachable only from localhost). | No, same reason. Local only. |
+| `dl-cdn.alpinelinux.org` and the registry holding the VM image, HTTPS | anylinuxfs | Downloads the Alpine Linux image and its packages (Btrfs tools, cryptsetup, the NFS server) the first time it runs, and again when you update it. | Only needed for the first setup and for upgrades. |
+
+Nothing else leaves your Mac: not the LUKS passphrase, not the Mac password, not file names or contents. If you want to see for yourself what is contacted, your firewall's connection log or `lsof -i -n -P | grep -E "GDrive|anylinuxfs|vmnet"` shows it. The Linux-side hostnames above are what I observed; anylinuxfs decides where it downloads from, so check its documentation for changes.
 
 ## Troubleshooting
 
-- **A firewall (Little Snitch, LuLu, …) asks about the app on every start.** The app is signed ad hoc, so every build has a new signature and a firewall sees a new program each time. Sign with a stable local certificate to avoid it, or allow the one connection (`api.github.com`).
+- **A firewall (Little Snitch, LuLu, …) asks about the app on every start.** The app is signed ad hoc, so every build has a new signature and a firewall sees a new program each time. Sign with a stable local certificate to avoid it, or see "Network access" above for what each connection is and which you can refuse.
 - **`-600` when relaunching right after `pkill`.** The old instance was still exiting; run `open` again.
 - **"Cannot probe /dev/diskNsM … Insufficient permissions".** The mount was started without `sudo`; use the app, which asks for it.
 

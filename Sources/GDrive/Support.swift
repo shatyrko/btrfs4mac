@@ -12,6 +12,25 @@ enum Config {
     static let keychainService = "g-drive.luks"
 }
 
+/// sudo asks for the Mac password through this helper, which shows a native dialog.
+enum Askpass {
+    static var path: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/G-Drive/askpass.sh").path
+    }
+
+    static func install() {
+        let script = """
+        #!/bin/sh
+        /usr/bin/osascript -e 'text returned of (display dialog "G-Drive needs your Mac password to read the disk." default answer "" with hidden answer with title "G-Drive" buttons {"Cancel", "OK"} default button "OK" with icon caution)'
+        """
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? script.write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+    }
+}
+
 struct CommandResult {
     let status: Int32
     let output: String

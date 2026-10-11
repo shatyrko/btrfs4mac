@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        Askpass.install()
         updateIcon()
         refresh()
         let poll = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
@@ -212,8 +213,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         state = .busy("Unlocking…")
         updateIcon()
-        run(Config.anylinuxfs, ["mount", "-w", "false", "--ignore-permissions", "/dev/\(partition)"],
-            env: ["ALFS_PASSPHRASE": passphrase ?? ""]) { [self] result in
+        // Reading the raw disk needs root; sudo drops back to this user once the VM is up.
+        run("/usr/bin/sudo", ["-A", "--preserve-env=ALFS_PASSPHRASE", Config.anylinuxfs,
+                              "mount", "-w", "false", "--ignore-permissions", "/dev/\(partition)"],
+            env: ["ALFS_PASSPHRASE": passphrase ?? "", "SUDO_ASKPASS": Askpass.path]) { [self] result in
             state = .notConnected
             if result.status == 0 && isMounted() {
                 if remember, let passphrase { Keychain.save(passphrase) }

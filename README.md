@@ -57,3 +57,9 @@ If the drive drops off the bus and comes back under another name (`disk4` → `d
 - **Verify Backup…** (LUKS Header menu): compares a saved header file with the header on the drive. Reports "matches", "out of date" (same drive, header changed since) or "another drive" (different LUKS UUID).
 - **Space and errors** in the menu: free space from `statfs`, error counters from `btrfs device stats`.
 - **Btrfs menu**: read-only snapshots of the whole volume in `.snapshots` (take, open in Finder, delete) and a scrub (full checksum check of the data, start/cancel, last result). They run `btrfs` inside the anylinuxfs VM through `anylinuxfs vm exec`, which needs a terminal, so the app wraps it in `script`.
+
+## Space, totals and subvolumes
+
+- The menu shows used and free space, and how much macOS has counted as written and read since the drive was plugged in.
+- **Btrfs ▸ Subvolumes** lists the subvolumes (open one in Finder, or create one with "New Subvolume…").
+- A snapshot covers the top level and every subvolume, in `.snapshots/<time>/` (`_root` for the top level, `/` in a subvolume path becomes `__`). A snapshot of the top level alone would hold empty folders where the subvolumes are.

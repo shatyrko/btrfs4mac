@@ -175,6 +175,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addBtrfsMenu(to menu: NSMenu) {
         let sub = addSubmenu(to: menu, "Btrfs", icon: "square.stack.3d.up.fill")
+        let subs = addSubmenu(to: sub, "Subvolumes (\(btrfsInfo?.subvolumes.count ?? 0))", icon: "folder.badge.gearshape")
+        if let paths = btrfsInfo?.subvolumes, !paths.isEmpty {
+            for path in paths {
+                let item = add(to: subs, path, icon: "folder", #selector(openSubvolume(_:)))
+                item.representedObject = path
+            }
+        } else {
+            add(to: subs, "None yet", icon: "tray")
+        }
+        subs.addItem(.separator())
+        add(to: subs, "New Subvolume…", icon: "plus", #selector(newSubvolume))
+        sub.addItem(.separator())
         add(to: sub, "Take Snapshot", icon: "camera.fill", #selector(snapshot))
         let snaps = addSubmenu(to: sub, "Snapshots (\(btrfsInfo?.snapshots.count ?? 0))", icon: "clock.arrow.circlepath")
         if let names = btrfsInfo?.snapshots, !names.isEmpty {
@@ -224,7 +236,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(to: menu, "\(Config.diskName) mounted", icon: "externaldrive.fill.badge.checkmark",
                 tip: Config.mountPoint)
             activityItem = add(to: menu, activityTitle(), icon: "arrow.up.arrow.down")
-            add(to: menu, spaceSummary() ?? "Space unknown", icon: "chart.pie")
+            if let space = spaceUsage() {
+                add(to: menu, space.used, icon: "chart.pie.fill")
+                add(to: menu, space.free, icon: "chart.pie")
+            }
+            if let totals = sampler.totals {
+                add(to: menu, "Since connected: \(formatBytes(Double(totals.written))) written, \(formatBytes(Double(totals.read))) read",
+                    icon: "arrow.up.arrow.down.circle",
+                    tip: "Counted by macOS for the drive since it was plugged in")
+            }
             if let errors = btrfsInfo?.errors {
                 add(to: menu, errors == 0 ? "No drive errors" : "\(errors) drive errors",
                     icon: errors == 0 ? "checkmark.shield" : "exclamationmark.triangle.fill",
@@ -409,10 +429,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.reloadBtrfs()
                 if result.ok {
-                    self.show("Snapshot taken", "Read-only snapshot \(result.name) is in \(Config.mountPoint)/.snapshots. It takes almost no space until files change.")
+                    self.show("Snapshot taken", "Read-only snapshot \(result.name) of the volume and all its subvolumes is in \(Config.mountPoint)/.snapshots. It takes almost no space until files change.")
                 } else {
                     self.show("Could not take a snapshot", result.output)
                 }
+            }
+        }
+    }
+
+    @objc private func openSubvolume(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: Config.mountPoint + "/" + path))
+    }
+
+    @objc private func newSubvolume() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "New subvolume"
+        alert.informativeText = "Name (letters, digits, _ - and .):"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn, !field.stringValue.isEmpty else { return }
+        let name = field.stringValue
+        DispatchQueue.global().async {
+            let result = createSubvolume(name)
+            DispatchQueue.main.async {
+                self.reloadBtrfs()
+                if result.status != 0 { self.show("Could not create the subvolume", result.output) }
             }
         }
     }

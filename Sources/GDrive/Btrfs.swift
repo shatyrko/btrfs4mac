@@ -18,13 +18,14 @@ struct BtrfsInfo {
     var scrub: String = "never run"
     var scrubRunning = false
     var snapshots: [String] = []
+    var subvolumes: [String] = []
 }
 
 func fetchBtrfsInfo() -> BtrfsInfo? {
-    let script = "\(btrfs) device stats \(vmMountPoint); echo ===; \(btrfs) scrub status \(vmMountPoint); echo ===; ls -1 \(snapshotDir) 2>/dev/null"
+    let script = "\(btrfs) device stats \(vmMountPoint); echo ===; \(btrfs) scrub status \(vmMountPoint); echo ===; ls -1 \(snapshotDir) 2>/dev/null; echo ===; \(btrfs) subvolume list \(vmMountPoint)"
     let result = vmExec(["sh", "-c", script])
     let parts = result.output.components(separatedBy: "===\n")
-    guard parts.count == 3 else { return nil }
+    guard parts.count == 4 else { return nil }
 
     var info = BtrfsInfo()
     var total = 0
@@ -49,35 +50,80 @@ func fetchBtrfsInfo() -> BtrfsInfo? {
     info.snapshots = parts[2].split(separator: "\n").map(String.init)
         .filter { $0.range(of: "^[0-9A-Za-z_-]+$", options: .regularExpression) != nil }
         .sorted(by: >)
+    info.subvolumes = subvolumePaths(parts[3]).filter { !$0.hasPrefix(".snapshots/") }.sorted()
     return info
 }
 
+/// Paths from `btrfs subvolume list` ("ID 256 gen 7 top level 5 path name").
+func subvolumePaths(_ listing: String) -> [String] {
+    listing.split(separator: "\n").compactMap { line in
+        line.range(of: " path ").map { String(line[$0.upperBound...]) }
+    }
+}
+
+private let safeName = "^[0-9A-Za-z_-]+$"
+private let safeSubvolumeName = "^[0-9A-Za-z_][0-9A-Za-z_.-]*$"
+
+/// Snapshots the top level and every subvolume (a snapshot of the top level alone
+/// holds only empty folders where subvolumes are) into .snapshots/<time>/.
 func takeSnapshot() -> (ok: Bool, name: String, output: String) {
     let f = DateFormatter()
     f.dateFormat = "yyyy-MM-dd_HHmmss"
     let name = f.string(from: Date())
-    let mk = vmExec(["mkdir", "-p", snapshotDir])
+    let dir = snapshotDir + "/" + name
+    let mk = vmExec(["mkdir", "-p", dir])
     guard mk.status == 0 else { return (false, name, mk.output) }
-    let snap = vmExec([btrfs, "subvolume", "snapshot", "-r", vmMountPoint, snapshotDir + "/" + name])
-    return (snap.status == 0, name, snap.output)
+
+    let list = vmExec([btrfs, "subvolume", "list", vmMountPoint])
+    let subvolumes = subvolumePaths(list.output).filter { !$0.hasPrefix(".snapshots/") }
+    var targets = [(source: vmMountPoint, label: "_root")]
+    for path in subvolumes {
+        targets.append((vmMountPoint + "/" + path, path.replacingOccurrences(of: "/", with: "__")))
+    }
+    for target in targets {
+        let snap = vmExec([btrfs, "subvolume", "snapshot", "-r", target.source, dir + "/" + target.label])
+        if snap.status != 0 { return (false, name, snap.output) }
+    }
+    return (true, name, "")
 }
 
+/// Deletes the snapshot subvolumes inside .snapshots/<name>/, then the folder.
 func deleteSnapshot(_ name: String) -> CommandResult {
-    guard name.range(of: "^[0-9A-Za-z_-]+$", options: .regularExpression) != nil else {
+    guard name.range(of: safeName, options: .regularExpression) != nil else {
         return CommandResult(status: 1, output: "bad snapshot name")
     }
-    return vmExec([btrfs, "subvolume", "delete", snapshotDir + "/" + name])
+    let prefix = ".snapshots/" + name + "/"
+    let list = vmExec([btrfs, "subvolume", "list", vmMountPoint])
+    for path in subvolumePaths(list.output) where path.hasPrefix(prefix) {
+        let result = vmExec([btrfs, "subvolume", "delete", vmMountPoint + "/" + path])
+        if result.status != 0 { return result }
+    }
+    return vmExec(["rmdir", snapshotDir + "/" + name])
+}
+
+func createSubvolume(_ name: String) -> CommandResult {
+    guard name.range(of: safeSubvolumeName, options: .regularExpression) != nil else {
+        return CommandResult(status: 1, output: "Use letters, digits, _ - and . only.")
+    }
+    return vmExec([btrfs, "subvolume", "create", vmMountPoint + "/" + name])
 }
 
 func startScrub() -> CommandResult { vmExec([btrfs, "scrub", "start", vmMountPoint]) }
 func cancelScrub() -> CommandResult { vmExec([btrfs, "scrub", "cancel", vmMountPoint]) }
 
-/// "21.9 TB free of 22.0 TB", straight from statfs (no VM involved).
-func spaceSummary() -> String? {
+func formatBytes(_ bytes: Double) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    var value = bytes
+    var unit = 0
+    while value >= 1000 && unit < units.count - 1 { value /= 1000; unit += 1 }
+    return unit < 3 ? String(format: "%.0f %@", value, units[unit]) : String(format: "%.2f %@", value, units[unit])
+}
+
+/// Used and free space straight from statfs (no VM involved).
+func spaceUsage() -> (used: String, free: String)? {
     var info = statfs()
     guard statfs(Config.mountPoint, &info) == 0 else { return nil }
     let size = Double(info.f_blocks) * Double(info.f_bsize)
     let free = Double(info.f_bavail) * Double(info.f_bsize)
-    func tb(_ v: Double) -> String { String(format: "%.2f TB", v / 1e12) }
-    return "\(tb(free)) free of \(tb(size))"
+    return ("\(formatBytes(size - free)) used", "\(formatBytes(free)) free of \(formatBytes(size))")
 }

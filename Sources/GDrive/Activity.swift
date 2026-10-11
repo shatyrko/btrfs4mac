@@ -37,8 +37,12 @@ struct ActivitySampler {
 
     private var last: (read: UInt64, written: UInt64, at: Date)?
 
+    /// Bytes moved since the drive was connected (the counters start at zero then).
+    private(set) var totals: (read: UInt64, written: UInt64)?
+
     mutating func sample(_ bsdName: String) -> Activity? {
         guard let now = diskCounters(bsdName) else { last = nil; return nil }
+        totals = (now.read, now.written)
         let stamp = Date()
         defer { last = (now.read, now.written, stamp) }
         guard let last, now.read >= last.read, now.written >= last.written else { return .idle }
@@ -50,7 +54,7 @@ struct ActivitySampler {
         return (r == 0 && w == 0) ? .idle : .active(readRate: r, writeRate: w)
     }
 
-    mutating func reset() { last = nil }
+    mutating func reset() { last = nil; totals = nil }
 }
 
 func formatRate(_ bytesPerSecond: Double) -> String {

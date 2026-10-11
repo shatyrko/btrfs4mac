@@ -155,3 +155,14 @@ The badge on the dashboard reads Btrfs' own per-device error counters, the ones 
 The app adds the five up. All zero is the green "No errors"; anything else turns the badge red with the total.
 
 What it does not tell you: the counters only move when Btrfs actually touches something broken, so data nobody has read since it went bad is unchecked (a scrub, in the Btrfs card, reads and verifies everything). It is also not SMART: SMART is not available through most USB bridges, so wear, reallocated sectors and temperature stay invisible. The counters last from when the filesystem was created until someone resets them with `btrfs device stats -z`.
+
+## Releasing
+
+Work happens on `main`. To ship a version, push a tag; GitHub Actions builds the DMG on a macOS runner and publishes the release with the DMG and its checksum:
+
+```bash
+git tag v0.3.1
+git push origin v0.3.1
+```
+
+The version in the app comes from the tag. "Build" runs on every push to `main` to catch a broken commit early. To try the release build without publishing anything, run the "Release" workflow by hand from the Actions tab; it keeps the DMG as a downloadable artifact.

@@ -87,6 +87,16 @@ func isMounted() -> Bool {
     return mountedOn == Config.mountPoint
 }
 
+/// Partition the mounted volume was served from, e.g. "disk4s1".
+func mountedDevice() -> String? {
+    var info = statfs()
+    guard statfs(Config.mountPoint, &info) == 0 else { return nil }
+    let from = withUnsafePointer(to: &info.f_mntfromname) {
+        $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+    }
+    return from.components(separatedBy: ".local:").first
+}
+
 /// Finds the first partition of the external disk called `Config.diskName`.
 /// Returns (whole disk, partition), e.g. ("disk4", "disk4s1").
 func findDrive() -> (disk: String, partition: String)? {

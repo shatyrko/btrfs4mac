@@ -1,5 +1,4 @@
 import AppKit
-import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     enum State {
@@ -13,7 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAlive = KeepAlive()
     private var state: State = .notConnected
     private var drive: (disk: String, partition: String)?
-    private var poll: Timer?
+    private var sampler = ActivitySampler()
+    private var activity: ActivitySampler.Activity = .idle
+    private var activityItem: NSMenuItem?
+    private var promptedFor: String?
 
     private var keepAliveEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "keepAlive") as? Bool ?? true }
@@ -24,8 +26,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        updateIcon()
         refresh()
-        poll = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
+        let poll = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
+        let sampling = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.sampleActivity() }
+        RunLoop.main.add(poll, forMode: .common)
+        RunLoop.main.add(sampling, forMode: .common)
     }
 
     // MARK: State
@@ -34,19 +40,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if case .busy = state { return }
         DispatchQueue.global().async {
             let mounted = isMounted()
-            let found = mounted ? nil : findDrive()
+            let device = mounted ? mountedDevice() : nil
+            let found = findDrive()
             DispatchQueue.main.async {
                 if case .busy = self.state { return }
                 if mounted {
+                    // The drive dropped off the bus and came back under another name:
+                    // the mount is dead and has to be cleared before unlocking again.
+                    if found == nil || found?.partition != device {
+                        self.resetStaleMount()
+                        return
+                    }
+                    self.drive = found
                     self.state = .mounted
                     if self.keepAliveEnabled { self.keepAlive.start() }
                 } else {
                     self.keepAlive.stop()
+                    self.sampler.reset()
+                    self.activity = .idle
                     if let found {
                         self.drive = found
                         self.state = .locked(partition: found.partition, disk: found.disk)
+                        // Plugged in and not yet asked about: unlock right away.
+                        if self.promptedFor != found.partition {
+                            self.promptedFor = found.partition
+                            self.unlock()
+                        }
                     } else {
                         self.drive = nil
+                        self.promptedFor = nil
                         self.state = .notConnected
                     }
                 }
@@ -55,17 +77,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func resetStaleMount() {
+        keepAlive.stop()
+        sampler.reset()
+        activity = .idle
+        state = .busy("Drive reconnected, clearing old mount…")
+        updateIcon()
+        run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "20"]) { [self] result in
+            state = .notConnected
+            if isMounted() {
+                show("Could not clear the old mount", String(result.output.suffix(1200)))
+                run(Config.anylinuxfs, ["stop"]) { _ in }
+            }
+            promptedFor = nil
+            refresh()
+        }
+    }
+
+    private func sampleActivity() {
+        guard case .mounted = state, let disk = drive?.disk else { return }
+        activity = sampler.sample(disk) ?? .idle
+        updateIcon()
+        activityItem?.title = activityTitle()
+    }
+
+    private func activityTitle() -> String {
+        switch activity {
+        case .idle:
+            return "Idle"
+        case .active(let r, let w):
+            var parts: [String] = []
+            if r > 0 { parts.append("reading \(formatRate(r))") }
+            if w > 0 { parts.append("writing \(formatRate(w))") }
+            return parts.joined(separator: ", ").capitalizedFirst
+        }
+    }
+
     private func updateIcon() {
         let symbol: String
         switch state {
         case .notConnected: symbol = "externaldrive.badge.xmark"
-        case .locked: symbol = "externaldrive"
-        case .busy: symbol = "externaldrive.badge.timemachine"
+        case .locked: symbol = "lock.fill"
+        case .busy: symbol = "hourglass"
         case .mounted: symbol = "externaldrive.fill"
         }
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "G-Drive")
         image?.isTemplate = true
         statusItem.button?.image = image
+
+        var arrows = ""
+        if case .active(let r, let w) = activity {
+            arrows = " " + (r > 0 && w > 0 ? "↕" : (w > 0 ? "↑" : "↓"))
+        }
+        statusItem.button?.title = arrows
     }
 
     // MARK: Menu
@@ -75,55 +139,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuild(menu)
     }
 
-    private func rebuild(_ menu: NSMenu) {
-        menu.removeAllItems()
-        func add(_ title: String, _ action: Selector?, enabled: Bool = true) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
-            item.isEnabled = enabled && action != nil
-            menu.addItem(item)
-        }
+    func menuDidClose(_ menu: NSMenu) { activityItem = nil }
 
-        switch state {
-        case .notConnected:
-            add("\(Config.diskName): not connected", nil)
-        case .locked(let partition, _):
-            add("\(Config.diskName): locked (\(partition))", nil)
-            menu.addItem(.separator())
-            add("Unlock and Mount…", #selector(unlock))
-            add("Eject Drive", #selector(ejectOnly))
-        case .busy(let what):
-            add(what, nil)
-        case .mounted:
-            add("\(Config.diskName): mounted at \(Config.mountPoint)", nil)
-            menu.addItem(.separator())
-            add("Open in Finder", #selector(openFinder))
-            add("Lock (Unmount)", #selector(lock))
-            add("Lock and Eject Drive", #selector(lockAndEject))
-            menu.addItem(.separator())
-            add(keepAliveEnabled ? "Keep-alive: on" : "Keep-alive: off",
-                #selector(toggleKeepAlive))
-            add(keepAliveStatus(), nil)
-        }
-
-        menu.addItem(.separator())
-        let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
-        login.target = self
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
-        add("Forget Saved Passphrase", #selector(forgetPassphrase), enabled: Keychain.load() != nil)
-        add("Quit G-Drive", #selector(quit))
+    @discardableResult
+    private func add(to menu: NSMenu, _ title: String, icon: String, _ action: Selector? = nil,
+                     tip: String? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = action != nil
+        item.toolTip = tip
+        item.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+        menu.addItem(item)
+        return item
     }
 
-    private func keepAliveStatus() -> String {
-        guard keepAliveEnabled else { return "  paused" }
-        if let error = keepAlive.lastError { return "  last write failed: \(error)" }
+    private func rebuild(_ menu: NSMenu) {
+        menu.removeAllItems()
+        switch state {
+        case .notConnected:
+            add(to: menu, "\(Config.diskName) not connected", icon: "externaldrive.badge.xmark")
+        case .locked(let partition, _):
+            add(to: menu, "\(Config.diskName) locked (\(partition))", icon: "lock.fill")
+            menu.addItem(.separator())
+            add(to: menu, "Unlock and Mount…", icon: "lock.open.fill", #selector(unlock))
+            add(to: menu, "Eject Drive", icon: "eject.fill", #selector(ejectOnly))
+        case .busy(let what):
+            add(to: menu, what, icon: "hourglass")
+        case .mounted:
+            add(to: menu, "\(Config.diskName) mounted", icon: "externaldrive.fill.badge.checkmark",
+                tip: Config.mountPoint)
+            activityItem = add(to: menu, activityTitle(), icon: "arrow.up.arrow.down")
+            menu.addItem(.separator())
+            add(to: menu, "Open in Finder", icon: "folder.fill", #selector(openFinder))
+            add(to: menu, "Lock", icon: "lock.fill", #selector(lock))
+            add(to: menu, "Lock and Eject Drive", icon: "eject.fill", #selector(lockAndEject))
+            menu.addItem(.separator())
+            add(to: menu, keepAliveEnabled ? "Keep-alive on" : "Keep-alive off",
+                icon: keepAliveEnabled ? "heart.fill" : "heart.slash", #selector(toggleKeepAlive))
+            let status = keepAliveStatus()
+            add(to: menu, status.text, icon: status.ok ? "checkmark.circle" : "exclamationmark.triangle",
+                tip: status.tip)
+        }
+        menu.addItem(.separator())
+        add(to: menu, "Forget Saved Passphrase", icon: "key.slash",
+            Keychain.load() != nil ? #selector(forgetPassphrase) : nil)
+        add(to: menu, "Quit G-Drive", icon: "power", #selector(quit))
+    }
+
+    private func keepAliveStatus() -> (text: String, ok: Bool, tip: String?) {
+        guard keepAliveEnabled else { return ("Paused", true, nil) }
+        if let error = keepAlive.lastError {
+            return ("Last write failed", false, error)
+        }
         if let ok = keepAlive.lastOK {
             let f = DateFormatter()
             f.timeStyle = .medium
-            return "  last write \(f.string(from: ok)), every \(Int(Config.keepAliveInterval)) s"
+            return ("Last write \(f.string(from: ok))", true, "Every \(Int(Config.keepAliveInterval)) s")
         }
-        return "  starting…"
+        return ("Starting…", true, nil)
     }
 
     // MARK: Actions
@@ -144,6 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state = .notConnected
             if result.status == 0 && isMounted() {
                 if remember, let passphrase { Keychain.save(passphrase) }
+                openFinder()
             } else {
                 Keychain.delete()
                 show("Could not mount", String(result.output.suffix(1200)))
@@ -164,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let disk = drive?.disk
         keepAlive.stop()
         state = .busy("Unmounting…")
+        activity = .idle
         updateIcon()
         run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"]) { [self] result in
             state = .notConnected
@@ -194,18 +269,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleKeepAlive() {
         keepAliveEnabled.toggle()
         if keepAliveEnabled { keepAlive.start() } else { keepAlive.stop() }
-    }
-
-    @objc private func toggleLogin() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            show("Launch at Login", "\(error.localizedDescription)\n\nThe app must live in ~/Applications.")
-        }
     }
 
     @objc private func forgetPassphrase() { Keychain.delete() }
@@ -239,6 +302,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.informativeText = text
         alert.runModal()
     }
+}
+
+private extension String {
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }
 
 let app = NSApplication.shared

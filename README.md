@@ -23,7 +23,7 @@ scripts/build.sh
 open ~/Applications/GDrive.app
 ```
 
-The app lives in `~/Applications`. "Launch at Login" in its menu only works from there.
+The app is installed to `~/Applications`.
 
 ## Menu
 
@@ -31,7 +31,10 @@ The app lives in `~/Applications`. "Launch at Login" in its menu only works from
 | --- | --- |
 | Drive not plugged in | status only |
 | Locked | Unlock and Mount…, Eject Drive |
-| Mounted | Open in Finder, Lock, Lock and Eject Drive, Keep-alive on/off, last keep-alive result |
+| Mounted | live read/write activity, Open in Finder, Lock, Lock and Eject Drive, Keep-alive on/off, last keep-alive result |
+
+Flow: plug the drive in, start the app. It finds the drive and asks for the passphrase at once, mounts it and opens Finder. While data moves, the menu bar icon shows ↑ (writing), ↓ (reading) or ↕, and the menu shows the rate.
+If the drive drops off the bus and comes back under another name (`disk4` → `disk5`), the old mount is dead; the app clears it and asks again.
 
 ## How it works
 

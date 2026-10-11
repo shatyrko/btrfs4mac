@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activity: ActivitySampler.Activity = .idle
     private var activityItem: NSMenuItem?
     private var promptedFor: String?
+    private var backingUp = false
 
     private var keepAliveEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "keepAlive") as? Bool ?? true }
@@ -163,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(to: menu, "\(Config.diskName) locked (\(partition))", icon: "lock.fill")
             menu.addItem(.separator())
             add(to: menu, "Unlock and Mount…", icon: "lock.open.fill", #selector(unlock))
+            add(to: menu, "Back Up LUKS Header…", icon: "key.horizontal.fill", #selector(backupHeader))
             add(to: menu, "Eject Drive", icon: "eject.fill", #selector(ejectOnly))
         case .busy(let what):
             add(to: menu, what, icon: "hourglass")
@@ -174,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(to: menu, "Open in Finder", icon: "folder.fill", #selector(openFinder))
             add(to: menu, "Lock", icon: "lock.fill", #selector(lock))
             add(to: menu, "Lock and Eject Drive", icon: "eject.fill", #selector(lockAndEject))
+            add(to: menu, "Back Up LUKS Header…", icon: "key.horizontal.fill", #selector(backupHeader))
             menu.addItem(.separator())
             add(to: menu, keepAliveEnabled ? "Keep-alive on" : "Keep-alive off",
                 icon: keepAliveEnabled ? "heart.fill" : "heart.slash", #selector(toggleKeepAlive))
@@ -272,6 +275,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleKeepAlive() {
         keepAliveEnabled.toggle()
         if keepAliveEnabled { keepAlive.start() } else { keepAlive.stop() }
+    }
+
+    @objc private func backupHeader() {
+        guard let partition = drive?.partition, !backingUp else { return }
+        let day = ISO8601DateFormatter().string(from: Date()).prefix(10)
+        let panel = NSSavePanel()
+        panel.title = "Back Up LUKS Header"
+        panel.message = "Where do you want to back up the LUKS header of \(Config.diskName)? Keep it off this drive."
+        panel.nameFieldStringValue = "\(Config.diskName)-luks-header-\(day).img"
+        panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        panel.canCreateDirectories = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if url.path.hasPrefix(Config.mountPoint + "/") {
+            show("Choose another place", "A header backup on the drive it protects is of no use if the drive fails.")
+            return
+        }
+        backingUp = true
+        DispatchQueue.global().async {
+            let result = backupLUKSHeader(partition: partition, to: url)
+            DispatchQueue.main.async {
+                self.backingUp = false
+                switch result {
+                case .success(let size):
+                    self.show("LUKS header saved", "\(url.path)\n\(size) bytes. Anyone who has this file and an old passphrase can unlock the drive, so keep it private.")
+                case .failure(let error):
+                    self.show("Could not back up the header", "\(error)")
+                }
+            }
+        }
     }
 
     @objc private func forgetPassphrase() { Keychain.delete() }

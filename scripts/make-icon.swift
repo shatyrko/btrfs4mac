@@ -1,5 +1,6 @@
 // Generates Resources/AppIcon.icns. Usage: swift scripts/make-icon.swift
-// Everything is drawn as vector paths and rendered separately at each size, so edges stay sharp.
+// The background and the lock are vector paths. The drive is the SF Symbol "externaldrive.fill", drawn at
+// its exact pixel size for each icon size: scaling a cached symbol bitmap makes it blocky.
 import AppKit
 
 func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor {
@@ -7,6 +8,8 @@ func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> NSColor 
 }
 
 /// Draws the icon in a 1024 x 1024 coordinate space.
+var drawDriveHook: (() -> Void)?
+
 func drawIcon() {
     let body = NSRect(x: 100, y: 100, width: 824, height: 824)
     let squircle = NSBezierPath(roundedRect: body, xRadius: 185, yRadius: 185)
@@ -29,22 +32,7 @@ func drawIcon() {
         .draw(in: NSRect(x: body.minX, y: body.midY, width: body.width, height: body.height / 2), angle: -90)
     NSGraphicsContext.restoreGraphicsState()
 
-    // Drive: a lid and a slab, both white.
-    NSColor.white.setFill()
-    NSColor.white.setStroke()
-    let lid = NSBezierPath()
-    lid.move(to: NSPoint(x: 290, y: 590))
-    lid.line(to: NSPoint(x: 350, y: 735))
-    lid.line(to: NSPoint(x: 590, y: 735))
-    lid.line(to: NSPoint(x: 650, y: 590))
-    lid.close()
-    lid.lineWidth = 44
-    lid.lineJoinStyle = .round
-    lid.fill()
-    lid.stroke()
-    NSBezierPath(roundedRect: NSRect(x: 235, y: 335, width: 470, height: 195), xRadius: 97, yRadius: 97).fill()
-    rgb(0.10, 0.26, 0.68, 0.55).setFill()
-    NSBezierPath(ovalIn: NSRect(x: 612, y: 405, width: 52, height: 52)).fill()
+    drawDriveHook?()
 
     // Lock badge.
     let badge = NSRect(x: 575, y: 215, width: 270, height: 270)
@@ -73,6 +61,19 @@ func drawIcon() {
     shackle.stroke()
 }
 
+/// The drive, drawn 1:1 in device pixels (no scaling), for an icon `pixels` wide.
+func drawDrive(pixels: Int) {
+    let scale = CGFloat(pixels) / 1024
+    let config = NSImage.SymbolConfiguration(pointSize: 420 * scale, weight: .semibold)
+        .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+    guard let symbol = NSImage(systemSymbolName: "externaldrive.fill", accessibilityDescription: nil)?
+        .withSymbolConfiguration(config) else { return }
+    let size = symbol.size
+    let center = CGPoint(x: 470 * scale, y: 565 * scale)
+    symbol.draw(in: NSRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                           width: size.width, height: size.height))
+}
+
 func png(pixels: Int) -> Data {
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8,
                                samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -83,6 +84,13 @@ func png(pixels: Int) -> Data {
     context.imageInterpolation = .high
     context.shouldAntialias = true
     let scale = CGFloat(pixels) / 1024
+    // The hook draws the drive between background and badge, in unscaled device pixels.
+    drawDriveHook = {
+        context.cgContext.saveGState()
+        context.cgContext.scaleBy(x: 1 / scale, y: 1 / scale)
+        drawDrive(pixels: pixels)
+        context.cgContext.restoreGState()
+    }
     context.cgContext.scaleBy(x: scale, y: scale)
     drawIcon()
     NSGraphicsContext.restoreGraphicsState()

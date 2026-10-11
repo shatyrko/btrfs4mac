@@ -7,11 +7,13 @@ cd "$(dirname "$0")/.."
 swift build -c release --arch arm64
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/GDrive"
 
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+git diff --quiet HEAD 2>/dev/null || COMMIT="$COMMIT-dirty"
 APP="build/GDrive.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/GDrive"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -20,7 +22,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>G-Drive</string>
   <key>CFBundleExecutable</key><string>GDrive</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>GDriveCommit</key><string>$COMMIT</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>

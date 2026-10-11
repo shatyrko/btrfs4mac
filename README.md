@@ -67,5 +67,11 @@ If the drive drops off the bus and comes back under another name (`disk4` → `d
 ## Start and quit
 
 - Starting the app with the drive plugged in asks for the passphrase and starts the anylinuxfs VM by mounting the volume. If the volume is already mounted, the app picks it up.
-- "Quit and Stop VM" unmounts the volume and waits for the VM to exit, so no `anylinuxfs`, `vmnet-helper` or `gvproxy` process stays behind. If data is moving it asks first, and if the unmount fails it offers a forced stop (`anylinuxfs stop`).
+- "Eject Drive and Quit" unmounts the volume, waits for the VM to exit (so no `anylinuxfs`, `vmnet-helper` or `gvproxy` process stays behind), ejects the drive and quits. If data is moving it asks first, and if the unmount fails it offers a forced stop (`anylinuxfs stop`). With no drive attached the item is just "Quit".
 - Killing the app (`pkill GDrive`) leaves the mount and the VM running on purpose, so the app can be restarted without unmounting.
+
+## About, updates and log
+
+- "About G-Drive…" shows the app version and build commit, the installed anylinuxfs version, and whether a newer anylinuxfs release exists on GitHub. The check runs at start and every 12 hours; an update adds an "Update available" line at the top of the menu. Upgrading is left to you: `brew update && brew upgrade anylinuxfs`.
+- Automatic actions (stale-mount reset, quit, unlock and lock results) are written to `~/Library/Logs/G-Drive.log`. anylinuxfs keeps its own session logs in `~/Library/Logs/anylinuxfs-*.log`.
+- A mount is treated as dead only when the drive came back under another name, or when it was missing in five checks in a row (15 s). One failed `diskutil` call no longer unmounts a healthy volume.

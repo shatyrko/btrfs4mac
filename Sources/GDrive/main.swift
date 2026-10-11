@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activityItem: NSMenuItem?
     private var promptedFor: String?
     private var backingUp = false
+    private var missingStrikes = 0
+    private var latestRelease: Release?
     private var btrfsInfo: BtrfsInfo?
     private var openMenu: NSMenu?
 
@@ -30,6 +32,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
         Askpass.install()
+        log("started \(Versions.app) (\(Versions.build))")
+        checkForUpdates()
+        let daily = Timer(timeInterval: 12 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates() }
+        RunLoop.main.add(daily, forMode: .common)
         updateIcon()
         refresh()
         let poll = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
@@ -49,12 +55,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 if case .busy = self.state { return }
                 if mounted {
-                    // The drive dropped off the bus and came back under another name:
-                    // the mount is dead and has to be cleared before unlocking again.
-                    if found == nil || found?.partition != device {
+                    // A mount is dead when the drive came back under another name (sure sign),
+                    // or when it stayed missing for several checks in a row (diskutil can fail once).
+                    if let found, found.partition != device {
+                        log("stale mount: mounted from \(device ?? "?"), drive is now \(found.partition)")
                         self.resetStaleMount()
                         return
                     }
+                    if found == nil {
+                        self.missingStrikes += 1
+                        if self.missingStrikes >= 5 {
+                            log("stale mount: drive missing in \(self.missingStrikes) checks in a row")
+                            self.missingStrikes = 0
+                            self.resetStaleMount()
+                        }
+                        return
+                    }
+                    self.missingStrikes = 0
                     self.drive = found
                     self.state = .mounted
                     if self.keepAliveEnabled { self.keepAlive.start() }
@@ -85,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keepAlive.stop()
         sampler.reset()
         activity = .idle
+        log("resetting stale mount")
         state = .busy("Drive reconnected, clearing old mount…")
         updateIcon()
         run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "20"]) { [self] result in
@@ -268,7 +286,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         add(to: menu, "Forget Saved Passphrase", icon: "key.slash",
             Keychain.load() != nil ? #selector(forgetPassphrase) : nil)
-        add(to: menu, "Quit and Stop VM", icon: "power", #selector(quit))
+        add(to: menu, "About G-Drive…", icon: "info.circle", #selector(about))
+        var quitTitle = "Quit"
+        if case .notConnected = state {} else { quitTitle = "Eject Drive and Quit" }
+        add(to: menu, quitTitle, icon: "eject.circle", #selector(quit),
+            tip: "Unmounts the volume, stops the Linux VM, ejects the drive and quits the app")
+        if let update = updateAvailable {
+            let item = NSMenuItem(title: "Update available: anylinuxfs \(update.version)",
+                                  action: #selector(openReleasePage), keyEquivalent: "")
+            item.target = self
+            item.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            menu.insertItem(item, at: 0)
+            menu.insertItem(.separator(), at: 1)
+        }
     }
 
     private func keepAliveStatus() -> (text: String, ok: Bool, tip: String?) {
@@ -302,6 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                               "mount", "-w", "false", "--ignore-permissions", "/dev/\(partition)"],
             env: ["ALFS_PASSPHRASE": passphrase ?? "", "SUDO_ASKPASS": Askpass.path]) { [self] result in
             state = .notConnected
+            log("unlock \(partition): exit \(result.status)")
             if result.status == 0 && isMounted() {
                 if remember, let passphrase { Keychain.save(passphrase) }
                 openFinder()
@@ -327,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state = .busy("Unmounting…")
         activity = .idle
         updateIcon()
+        log("lock\(doEject ? " and eject" : "") requested")
         run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"]) { [self] result in
             state = .notConnected
             if result.status != 0 {
@@ -519,33 +551,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Quit
 
-    /// Quitting unmounts the volume and stops the VM, so nothing is left running.
+    /// Quitting unmounts the volume, stops the VM and ejects the drive, so nothing is left running.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if case .busy = state {
             show("G-Drive is busy", "Wait for the current step to finish, then quit.")
             return .terminateCancel
         }
-        guard isMounted() || vmProcessesRunning() else { return .terminateNow }
+        let disk = drive?.disk ?? findDrive()?.disk
+        let needsUnmount = isMounted() || vmProcessesRunning()
+        guard needsUnmount || disk != nil else { return .terminateNow }
 
-        if case .active = activity {
+        if needsUnmount, case .active = activity {
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.messageText = "Data is being transferred"
-            alert.informativeText = "Quitting unmounts the drive and stops the Linux VM. Wait until the transfer is done."
+            alert.informativeText = "Quitting unmounts the drive, stops the Linux VM and ejects the drive. Wait until the transfer is done."
             alert.addButton(withTitle: "Cancel")
             alert.addButton(withTitle: "Unmount and Quit")
             if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }
         }
 
+        log("quit: unmount=\(needsUnmount) eject=\(disk ?? "none")")
         keepAlive.stop()
-        state = .busy("Unmounting…")
+        state = .busy("Unmounting and ejecting…")
         updateIcon()
-        run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"]) { [self] result in
-            if !isMounted() && !vmProcessesRunning() {
+
+        let finish = { [self] in
+            guard let disk else { NSApp.reply(toApplicationShouldTerminate: true); return }
+            run("/usr/sbin/diskutil", ["eject", "/dev/\(disk)"]) { [self] result in
+                log("eject \(disk): exit \(result.status)")
+                if result.status != 0 { show("Could not eject the drive", result.output) }
                 NSApp.reply(toApplicationShouldTerminate: true)
-                return
             }
+        }
+        if !needsUnmount { finish(); return .terminateLater }
+
+        run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"]) { [self] result in
+            if !isMounted() && !vmProcessesRunning() { finish(); return }
             // Still mounted (files open?) or the VM did not exit: ask before forcing it.
+            log("quit: unmount did not finish cleanly: \(result.output.suffix(200))")
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.messageText = "The drive did not unmount cleanly"
@@ -558,11 +602,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSApp.reply(toApplicationShouldTerminate: false)
                 return
             }
-            run(Config.anylinuxfs, ["stop"]) { _ in
-                NSApp.reply(toApplicationShouldTerminate: true)
-            }
+            run(Config.anylinuxfs, ["stop"]) { _ in finish() }
         }
         return .terminateLater
+    }
+
+    // MARK: Updates and About
+
+    private func checkForUpdates(then: (() -> Void)? = nil) {
+        fetchLatestRelease { [self] release in
+            if let release { latestRelease = release }
+            then?()
+        }
+    }
+
+    private var updateAvailable: Release? {
+        guard let latest = latestRelease, let installed = Versions.anylinuxfs(),
+              isNewer(latest.version, than: installed) else { return nil }
+        return latest
+    }
+
+    @objc private func openReleasePage() {
+        if let url = updateAvailable.flatMap({ URL(string: $0.url) }) { NSWorkspace.shared.open(url) }
+    }
+
+    @objc private func about() {
+        checkForUpdates { [self] in
+            let installed = Versions.anylinuxfs() ?? "not found"
+            var vm = "anylinuxfs \(installed)"
+            if let latest = latestRelease {
+                vm += isNewer(latest.version, than: installed)
+                    ? ", update available: \(latest.version)\nUpgrade with: brew update && brew upgrade anylinuxfs"
+                    : ", up to date"
+            } else {
+                vm += ", could not check for updates"
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "G-Drive \(Versions.app)"
+            alert.informativeText = "Build \(Versions.build)\n\nLinux VM (microVM): \(vm)"
+            alert.addButton(withTitle: "OK")
+            if updateAvailable != nil { alert.addButton(withTitle: "Release Page") }
+            if alert.runModal() == .alertSecondButtonReturn { openReleasePage() }
+        }
     }
 
     // MARK: Dialogs

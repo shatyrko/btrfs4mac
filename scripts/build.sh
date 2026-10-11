@@ -11,7 +11,8 @@ COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 git diff --quiet HEAD 2>/dev/null || COMMIT="$COMMIT-dirty"
 APP="build/GDrive.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp "$BIN" "$APP/Contents/MacOS/GDrive"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -21,6 +22,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>local.g-drive</string>
   <key>CFBundleName</key><string>G-Drive</string>
   <key>CFBundleExecutable</key><string>GDrive</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.2.0</string>
   <key>GDriveCommit</key><string>$COMMIT</string>

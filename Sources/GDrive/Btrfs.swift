@@ -132,11 +132,9 @@ func formatBytes(_ bytes: Double) -> String {
     return unit < 3 ? String(format: "%.0f %@", value, units[unit]) : String(format: "%.2f %@", value, units[unit])
 }
 
-/// Used and free space straight from statfs (no VM involved).
-func spaceUsage() -> (used: String, free: String)? {
+/// Total and free bytes straight from statfs (no VM involved).
+func spaceNumbers() -> (size: Double, free: Double)? {
     var info = statfs()
     guard statfs(Config.mountPoint, &info) == 0 else { return nil }
-    let size = Double(info.f_blocks) * Double(info.f_bsize)
-    let free = Double(info.f_bavail) * Double(info.f_bsize)
-    return ("\(formatBytes(size - free)) used", "\(formatBytes(free)) free of \(formatBytes(size))")
+    return (Double(info.f_blocks) * Double(info.f_bsize), Double(info.f_bavail) * Double(info.f_bsize))
 }

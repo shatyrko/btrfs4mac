@@ -14,7 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var drive: (disk: String, partition: String)?
     private var sampler = ActivitySampler()
     private var activity: ActivitySampler.Activity = .idle
-    private var activityItem: NSMenuItem?
+    private var dashboard: DashboardView?
+    private var space: (size: Double, free: Double)?
+    private var readHistory: [Double] = []
+    private var writeHistory: [Double] = []
     private var promptedFor: String?
     private var backingUp = false
     private var missingStrikes = 0
@@ -52,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let mounted = isMounted()
             let device = mounted ? mountedDevice() : nil
             let found = findDrive()
+            let space = mounted ? spaceNumbers() : nil
             DispatchQueue.main.async {
                 if case .busy = self.state { return }
                 if mounted {
@@ -72,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         return
                     }
                     self.missingStrikes = 0
+                    if let space { self.space = space }
                     self.drive = found
                     self.state = .mounted
                     if self.keepAliveEnabled { self.keepAlive.start() }
@@ -79,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.keepAlive.stop()
                     self.sampler.reset()
                     self.activity = .idle
+                    self.readHistory = []
+                    self.writeHistory = []
+                    self.space = nil
                     if let found {
                         self.drive = found
                         self.state = .locked(partition: found.partition, disk: found.disk)
@@ -119,20 +127,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func sampleActivity() {
         guard case .mounted = state, let disk = drive?.disk else { return }
         activity = sampler.sample(disk) ?? .idle
+        var read = 0.0, write = 0.0
+        if case .active(let r, let w) = activity { read = r; write = w }
+        readHistory = Array((readHistory + [read]).suffix(DashboardView.historyLength))
+        writeHistory = Array((writeHistory + [write]).suffix(DashboardView.historyLength))
         updateIcon()
-        activityItem?.title = activityTitle()
+        dashboard?.data = dashboardData()
     }
 
-    private func activityTitle() -> String {
-        switch activity {
-        case .idle:
-            return "Idle"
-        case .active(let r, let w):
-            var parts: [String] = []
-            if r > 0 { parts.append("reading \(formatRate(r))") }
-            if w > 0 { parts.append("writing \(formatRate(w))") }
-            return parts.joined(separator: ", ").capitalizedFirst
+    private func dashboardData() -> DashboardData {
+        var d = DashboardData()
+        if let space {
+            d.total = space.size
+            d.used = max(space.size - space.free, 0)
         }
+        d.errors = btrfsInfo?.errors
+        d.activity = activity
+        d.written = sampler.totals?.written
+        d.read = sampler.totals?.read
+        d.reads = readHistory
+        d.writes = writeHistory
+        return d
     }
 
     private func updateIcon() {
@@ -172,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
-        activityItem = nil
+        dashboard = nil
         openMenu = nil
     }
 
@@ -254,23 +269,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .busy(let what):
             add(to: menu, what, icon: "hourglass")
         case .mounted:
-            add(to: menu, "\(Config.diskName) mounted", icon: "externaldrive.fill.badge.checkmark",
-                tip: Config.mountPoint)
-            activityItem = add(to: menu, activityTitle(), icon: "arrow.up.arrow.down")
-            if let space = spaceUsage() {
-                add(to: menu, space.used, icon: "chart.pie.fill")
-                add(to: menu, space.free, icon: "chart.pie")
-            }
-            if let totals = sampler.totals {
-                add(to: menu, "\(formatBytes(Double(totals.written))) written, \(formatBytes(Double(totals.read))) read",
-                    icon: "arrow.up.arrow.down.circle",
-                    tip: "Counted by macOS for the drive since it was plugged in")
-            }
-            if let errors = btrfsInfo?.errors {
-                add(to: menu, errors == 0 ? "No drive errors" : "\(errors) drive errors",
-                    icon: errors == 0 ? "checkmark.shield" : "exclamationmark.triangle.fill",
-                    tip: "btrfs device stats: read, write, flush, corruption and generation errors")
-            }
+            let card = DashboardView()
+            card.data = dashboardData()
+            dashboard = card
+            let cardItem = NSMenuItem()
+            cardItem.view = card
+            menu.addItem(cardItem)
             menu.addItem(.separator())
             add(to: menu, "Open in Finder", icon: "folder.fill", #selector(openFinder))
             add(to: menu, "Lock", icon: "lock.fill", #selector(lock))

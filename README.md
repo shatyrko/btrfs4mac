@@ -31,7 +31,7 @@ The app is installed to `/Applications` (to `~/Applications` if `/Applications` 
 | --- | --- |
 | Drive not plugged in | status only |
 | Locked | Unlock and Mount…, Back Up LUKS Header…, Eject Drive |
-| Mounted | live read/write activity, Open in Finder, Lock, Lock and Eject Drive, Back Up LUKS Header…, Keep Drive Awake (tick), last keep-alive result |
+| Mounted | a dashboard card (space bar, live throughput graph, health, totals), Open in Finder, Lock, Lock and Eject Drive, Back Up LUKS Header…, Keep Drive Awake (tick), last keep-alive result |
 
 Flow: plug the drive in, start the app. It finds the drive and asks for the passphrase at once, mounts it and opens Finder. While data moves, the menu bar icon shows ↑ (writing), ↓ (reading) or ↕, and the menu shows the rate.
 If the drive drops off the bus and comes back under another name (`disk4` → `disk5`), the old mount is dead; the app clears it and asks again.
@@ -83,3 +83,7 @@ If the drive drops off the bus and comes back under another name (`disk4` → `d
 ## Snapshot of one subvolume
 
 Btrfs ▸ Subvolumes ▸ (a subvolume) ▸ "Take Snapshot of …" snapshots just that subvolume into `.snapshots/<time>-<name>/`. "Take Snapshot" in the Btrfs menu still covers the top level and every subvolume.
+
+## Dashboard
+
+The top of the menu while the drive is mounted is one card (`Sources/GDrive/Dashboard.swift`): drive name and mount point, a health badge from `btrfs device stats`, a used/free bar (orange above 80 %, red above 92 %), a 60-second read/write throughput graph with the current rates, and the bytes macOS counted as written and read. The graph is sampled once a second, also while the menu is closed.

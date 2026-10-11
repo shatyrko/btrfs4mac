@@ -136,3 +136,8 @@ func findDrive() -> (disk: String, partition: String)? {
     }
     return nil
 }
+
+/// Processes anylinuxfs leaves behind while its VM is up.
+func vmProcessesRunning() -> Bool {
+    ["anylinuxfs", "vmnet-helper", "gvproxy"].contains { runSync("/usr/bin/pgrep", ["-x", $0]).status == 0 }
+}

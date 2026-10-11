@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds GDrive.app, signs it ad hoc (no Apple account, no notarization) and
-# installs it to ~/Applications. Usage: scripts/build.sh [--no-install]
+# installs it to /Applications (or ~/Applications). Usage: scripts/build.sh [--no-install]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,8 +30,10 @@ PLIST
 codesign --force --sign - "$APP"
 
 if [ "${1:-}" != "--no-install" ]; then
-  mkdir -p "$HOME/Applications"
-  rm -rf "$HOME/Applications/GDrive.app"
-  cp -R "$APP" "$HOME/Applications/GDrive.app"
-  echo "Installed: $HOME/Applications/GDrive.app"
+  # /Applications is writable for admin users; fall back to ~/Applications otherwise
+  DEST=/Applications
+  [ -w "$DEST" ] || { DEST="$HOME/Applications"; mkdir -p "$DEST"; }
+  rm -rf "$DEST/GDrive.app" "$HOME/Applications/GDrive.app"
+  cp -R "$APP" "$DEST/GDrive.app"
+  echo "Installed: $DEST/GDrive.app"
 fi

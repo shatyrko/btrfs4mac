@@ -268,7 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         add(to: menu, "Forget Saved Passphrase", icon: "key.slash",
             Keychain.load() != nil ? #selector(forgetPassphrase) : nil)
-        add(to: menu, "Quit G-Drive", icon: "power", #selector(quit))
+        add(to: menu, "Quit and Stop VM", icon: "power", #selector(quit))
     }
 
     private func keepAliveStatus() -> (text: String, ok: Bool, tip: String?) {
@@ -516,6 +516,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func forgetPassphrase() { Keychain.delete() }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: Quit
+
+    /// Quitting unmounts the volume and stops the VM, so nothing is left running.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if case .busy = state {
+            show("G-Drive is busy", "Wait for the current step to finish, then quit.")
+            return .terminateCancel
+        }
+        guard isMounted() || vmProcessesRunning() else { return .terminateNow }
+
+        if case .active = activity {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Data is being transferred"
+            alert.informativeText = "Quitting unmounts the drive and stops the Linux VM. Wait until the transfer is done."
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Unmount and Quit")
+            if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }
+        }
+
+        keepAlive.stop()
+        state = .busy("Unmounting…")
+        updateIcon()
+        run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"]) { [self] result in
+            if !isMounted() && !vmProcessesRunning() {
+                NSApp.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            // Still mounted (files open?) or the VM did not exit: ask before forcing it.
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "The drive did not unmount cleanly"
+            alert.informativeText = String(result.output.suffix(600)) + "\n\nForce Stop kills the VM; data not yet written is lost."
+            alert.addButton(withTitle: "Stay Open")
+            alert.addButton(withTitle: "Force Stop and Quit")
+            if alert.runModal() == .alertFirstButtonReturn {
+                state = .notConnected
+                refresh()
+                NSApp.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            run(Config.anylinuxfs, ["stop"]) { _ in
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
+    }
 
     // MARK: Dialogs
 

@@ -20,10 +20,10 @@ Personal tool, not for distribution. No Apple developer account, no notarization
 
 ```bash
 scripts/build.sh
-open ~/Applications/GDrive.app
+open /Applications/GDrive.app
 ```
 
-The app is installed to `~/Applications`.
+The app is installed to `/Applications` (to `~/Applications` if `/Applications` is not writable). Start it from Launchpad, Spotlight or Finder; it has no Dock icon, only the menu bar icon.
 
 ## Menu
 
@@ -63,3 +63,9 @@ If the drive drops off the bus and comes back under another name (`disk4` → `d
 - The menu shows used and free space, and how much macOS has counted as written and read since the drive was plugged in.
 - **Btrfs ▸ Subvolumes** lists the subvolumes (open one in Finder, or create one with "New Subvolume…").
 - A snapshot covers the top level and every subvolume, in `.snapshots/<time>/` (`_root` for the top level, `/` in a subvolume path becomes `__`). A snapshot of the top level alone would hold empty folders where the subvolumes are.
+
+## Start and quit
+
+- Starting the app with the drive plugged in asks for the passphrase and starts the anylinuxfs VM by mounting the volume. If the volume is already mounted, the app picks it up.
+- "Quit and Stop VM" unmounts the volume and waits for the VM to exit, so no `anylinuxfs`, `vmnet-helper` or `gvproxy` process stays behind. If data is moving it asks first, and if the unmount fails it offers a forced stop (`anylinuxfs stop`).
+- Killing the app (`pkill GDrive`) leaves the mount and the VM running on purpose, so the app can be restarted without unmounting.

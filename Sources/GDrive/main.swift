@@ -262,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 add(to: menu, space.free, icon: "chart.pie")
             }
             if let totals = sampler.totals {
-                add(to: menu, "Since connected: \(formatBytes(Double(totals.written))) written, \(formatBytes(Double(totals.read))) read",
+                add(to: menu, "\(formatBytes(Double(totals.written))) written, \(formatBytes(Double(totals.read))) read",
                     icon: "arrow.up.arrow.down.circle",
                     tip: "Counted by macOS for the drive since it was plugged in")
             }

@@ -3,6 +3,7 @@
 # installs it to /Applications (or ~/Applications). Usage: scripts/build.sh [--no-install]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+VERSION="${VERSION:-0.3.0}"
 
 swift build -c release --arch arm64
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/btrfs4mac"
@@ -24,7 +25,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>btrfs4mac</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>Btrfs4MacCommit</key><string>$COMMIT</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

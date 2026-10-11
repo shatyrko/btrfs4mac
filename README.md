@@ -40,7 +40,26 @@ It works with **any external drive**, whatever the make: the drive is found auto
   ```
 - An admin account: reading the raw disk needs `sudo`, which the app requests through a native password dialog.
 
-## Build and install
+## Install
+
+### Option 1: the DMG
+
+1. Install [anylinuxfs](https://github.com/nohajc/anylinuxfs) (see Requirements).
+2. Download `btrfs4mac-<version>.dmg` from the [Releases page](https://github.com/shatyrko/btrfs4mac/releases), open it and drag **btrfs4mac** onto **Applications**.
+3. **The first launch is blocked by macOS.** The app is signed ad hoc and not notarized (notarizing needs a paid Apple Developer account), so Gatekeeper refuses a downloaded copy with a message like "btrfs4mac can't be opened because Apple cannot check it for malicious software". It is a one-time step:
+   1. Open btrfs4mac once (double-click) and close the message.
+   2. Open **System Settings ▸ Privacy & Security**, scroll down to **Security**.
+   3. Next to *"btrfs4mac" was blocked to protect your Mac*, click **Open Anyway**, confirm with your password or Touch ID, then open the app again and confirm **Open**.
+
+   On macOS 15 (Sequoia) and later, the old right-click ▸ Open shortcut no longer works; the Settings step above is the way. The same thing from a terminal:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/btrfs4mac.app
+   ```
+4. Optional: check the download against the `.sha256` file from the release: `shasum -a 256 -c btrfs4mac-<version>.dmg.sha256`.
+
+### Option 2: build it yourself
+
+A copy you build on your own Mac is not quarantined, so Gatekeeper does not get in the way.
 
 ```bash
 git clone https://github.com/shatyrko/btrfs4mac.git
@@ -49,7 +68,7 @@ scripts/build.sh
 open /Applications/btrfs4mac.app
 ```
 
-`scripts/build.sh` builds with SwiftPM, signs the app ad hoc (no Apple developer account, no notarization) and installs it to `/Applications` (or `~/Applications` if that is not writable). It has no Dock icon, only the menu bar icon.
+`scripts/build.sh` builds with SwiftPM, signs the app ad hoc (no Apple developer account) and installs it to `/Applications` (or `~/Applications` if that is not writable). `scripts/make-dmg.sh` makes the DMG. The app has no Dock icon, only the menu bar icon.
 
 ## Choosing the drive
 

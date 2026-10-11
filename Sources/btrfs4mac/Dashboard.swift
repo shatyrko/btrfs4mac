@@ -1,8 +1,11 @@
 import AppKit
 
 struct DashboardData {
-    var name = "Drive"
     var mountPoint = ""
+    /// "SanDisk G-DRIVE · 22.00 TB"
+    var model = ""
+    /// "USB 10 Gb/s · S/N 3247…"
+    var link = ""
     var used: Double = 0
     var total: Double = 0
     var errors: Int?
@@ -17,7 +20,7 @@ struct DashboardData {
 /// The card at the top of the menu: drive, health, space, live throughput and totals.
 final class DashboardView: NSView {
     static let historyLength = 60
-    static let size = NSSize(width: 330, height: 188)
+    static let size = NSSize(width: 330, height: 204)
 
     var data = DashboardData() { didSet { needsDisplay = true } }
 
@@ -60,10 +63,11 @@ final class DashboardView: NSView {
                 .applying(.init(paletteColors: [brand]))) {
             icon.draw(in: NSRect(x: margin, y: 12, width: icon.size.width, height: icon.size.height))
         }
-        draw(data.name, at: NSPoint(x: margin + 34, y: 10), size: 14, weight: .semibold)
+        draw(data.mountPoint, at: NSPoint(x: margin + 34, y: 9), size: 14, weight: .semibold)
         NSColor.systemGreen.setFill()
         NSBezierPath(ovalIn: NSRect(x: margin + 34, y: 31, width: 7, height: 7)).fill()
-        draw("Mounted at \(data.mountPoint)", at: NSPoint(x: margin + 46, y: 28), size: 11, color: .secondaryLabelColor)
+        draw(data.model, at: NSPoint(x: margin + 46, y: 28), size: 11, color: .secondaryLabelColor)
+        draw(data.link, at: NSPoint(x: margin + 34, y: 45), size: 10, color: .tertiaryLabelColor, monospaced: true)
 
         if let errors = data.errors {
             let ok = errors == 0
@@ -83,7 +87,7 @@ final class DashboardView: NSView {
 
         // Space bar.
         let fraction = data.total > 0 ? min(max(data.used / data.total, 0), 1) : 0
-        let barY: CGFloat = 56
+        let barY: CGFloat = 72
         let track = NSRect(x: margin, y: barY, width: inner, height: 10)
         NSColor.tertiaryLabelColor.withAlphaComponent(0.35).setFill()
         NSBezierPath(roundedRect: track, xRadius: 5, yRadius: 5).fill()
@@ -101,7 +105,7 @@ final class DashboardView: NSView {
              rightAligned: true, monospaced: true)
 
         // Activity graph.
-        let panel = NSRect(x: margin, y: 100, width: inner, height: 54)
+        let panel = NSRect(x: margin, y: 116, width: inner, height: 54)
         NSColor.tertiaryLabelColor.withAlphaComponent(0.14).setFill()
         NSBezierPath(roundedRect: panel, xRadius: 9, yRadius: 9).fill()
 
@@ -123,7 +127,7 @@ final class DashboardView: NSView {
              color: .tertiaryLabelColor, rightAligned: true)
 
         // Totals.
-        let totalsY: CGFloat = 162
+        let totalsY: CGFloat = 178
         if let written = data.written, let read = data.read {
             writeColor.setFill()
             NSBezierPath(ovalIn: NSRect(x: margin, y: totalsY + 4, width: 8, height: 8)).fill()

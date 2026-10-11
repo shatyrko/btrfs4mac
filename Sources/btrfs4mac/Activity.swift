@@ -60,3 +60,37 @@ struct ActivitySampler {
 func formatRate(_ bytesPerSecond: Double) -> String {
     String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
 }
+
+struct DriveHardware {
+    var vendor = ""
+    var product = ""
+    var serial = ""
+    var linkBitsPerSecond: Double = 0
+}
+
+/// What the USB device behind /dev/<disk> reports about itself.
+func driveHardware(disk bsdName: String) -> DriveHardware? {
+    let match = IOServiceMatching("IOMedia") as NSMutableDictionary
+    match["IOPropertyMatch"] = ["BSD Name": bsdName]
+    var entry = IOServiceGetMatchingService(kIOMainPortDefault, match)
+    guard entry != 0 else { return nil }
+    defer { IOObjectRelease(entry) }
+
+    for _ in 0..<16 {
+        var parent: io_registry_entry_t = 0
+        guard IORegistryEntryGetParentEntry(entry, kIOServicePlane, &parent) == KERN_SUCCESS else { return nil }
+        IOObjectRelease(entry)
+        entry = parent
+        guard IOObjectConformsTo(entry, "IOUSBHostDevice") != 0 else { continue }
+        func property(_ key: String) -> Any? {
+            IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+        }
+        var hardware = DriveHardware()
+        hardware.vendor = (property("USB Vendor Name") as? String) ?? ""
+        hardware.product = (property("USB Product Name") as? String) ?? ""
+        hardware.serial = (property("USB Serial Number") as? String) ?? ""
+        hardware.linkBitsPerSecond = (property("UsbLinkSpeed") as? NSNumber)?.doubleValue ?? 0
+        return hardware
+    }
+    return nil
+}

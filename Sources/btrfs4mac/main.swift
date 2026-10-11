@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAlive = KeepAlive()
     private var state: State = .notConnected
     private var drive: DriveInfo?
+    private var hardware: DriveHardware?
     private var driveChoices: [DriveInfo] = []
     private var sampler = ActivitySampler()
     private var activity: ActivitySampler.Activity = .idle
@@ -75,8 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var found: DriveInfo?
             if let pinned = Config.pinnedDiskName { found = all.first { $0.name == pinned } } else { found = all.first }
             let space = mounted ? spaceNumbers() : nil
+            let hardware = found.flatMap { driveHardware(disk: $0.disk) }
             DispatchQueue.main.async {
                 self.driveChoices = all
+                if let hardware { self.hardware = hardware }
                 if case .busy = self.state { return }
                 if mounted {
                     // A mount is dead when the drive came back under another name (sure sign),
@@ -157,8 +160,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func dashboardData() -> DashboardData {
         var d = DashboardData()
-        d.name = driveName
         d.mountPoint = Config.mountPoint
+        let make = [hardware?.vendor, hardware?.product].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+        d.model = (make.isEmpty ? driveName : make) + (drive.map { " · " + formatBytes($0.size) } ?? "")
+        var link: [String] = []
+        if let bits = hardware?.linkBitsPerSecond, bits > 0 {
+            link.append(bits >= 1e9 ? String(format: "USB %.0f Gb/s", bits / 1e9) : String(format: "USB %.0f Mb/s", bits / 1e6))
+        }
+        if let serial = hardware?.serial, !serial.isEmpty { link.append("S/N " + serial) }
+        d.link = link.joined(separator: " · ")
         if let space {
             d.total = space.size
             d.used = max(space.size - space.free, 0)

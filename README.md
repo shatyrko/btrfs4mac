@@ -14,7 +14,7 @@ It works with **any external drive**, whatever the make: the drive is found auto
 - **One-click unlock and mount.** Finds the drive, asks for the LUKS passphrase (optionally remembers it in the Keychain), mounts the volume, opens Finder.
 - **One-click eject.** "Eject Drive and Quit" unmounts, stops the VM, ejects the drive and quits, leaving no `anylinuxfs`, `vmnet-helper` or `gvproxy` process behind.
 - **Keep the drive awake.** Many USB drives power themselves off after a minute or so of idle, which kills a mounted volume. While mounted, the app writes and syncs a few bytes every 20 seconds so the drive never idles.
-- **Live dashboard** at the top of the menu: used/free space bar, a 60-second read/write throughput graph with the current rates, a health badge (`btrfs device stats`), and the bytes written and read.
+- **Live dashboard** at the top of the menu: the mount point, the drive's vendor, model, capacity, USB link speed and serial number, a used/free space bar, a 60-second read/write throughput graph with the current rates, a health badge (`btrfs device stats`, see "What \"No errors\" means"), and the bytes written and read.
 - **Btrfs card** in the main menu: every subvolume with its size (open, create, snapshot one) and snapshots (open, delete, snapshot everything) as rows with buttons, plus a scrub (full checksum check of all data) with an estimated progress bar and the result of the last run.
 - **LUKS header backup and verify.** Saves the LUKS header to a file you choose and compares a saved file with the drive later.
 - **Recovers from a dropped drive.** If the drive comes back under a new disk name, the dead mount is cleared and the app asks again.
@@ -124,3 +124,15 @@ Nothing else leaves your Mac: not the LUKS passphrase, not the Mac password, not
 - It runs [anylinuxfs](https://github.com/nohajc/anylinuxfs) (GPL-3.0) as a separate program that you install yourself; no anylinuxfs code is included or linked.
 - The small glyphs in the menu are Apple SF Symbols, used inside the app's interface as Apple's terms allow. The app icon is an original drawing (`scripts/make-icon.swift`) and does not use SF Symbols.
 - Not affiliated with or endorsed by SanDisk, Western Digital, Apple or the anylinuxfs project. Product names are used only to say what the tool was tested with.
+
+## What "No errors" means
+
+The badge on the dashboard reads Btrfs' own per-device error counters, the ones `btrfs device stats` prints, through the VM. Btrfs keeps them in the filesystem itself and bumps them whenever something goes wrong:
+
+- `write_io_errs`, `read_io_errs`, `flush_io_errs`: the drive failed or refused a write, a read or a flush
+- `corruption_errs`: a block was read and its checksum did not match (silent corruption caught)
+- `generation_errs`: a block's generation number did not match what the metadata expects (an inconsistency)
+
+The app adds the five up. All zero is the green "No errors"; anything else turns the badge red with the total.
+
+What it does not tell you: the counters only move when Btrfs actually touches something broken, so data nobody has read since it went bad is unchecked (a scrub, in the Btrfs card, reads and verifies everything). It is also not SMART: SMART is not available through most USB bridges, so wear, reallocated sectors and temperature stay invisible. The counters last from when the filesystem was created until someone resets them with `btrfs device stats -z`.

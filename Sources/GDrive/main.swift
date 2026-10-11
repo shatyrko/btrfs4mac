@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activityItem: NSMenuItem?
     private var promptedFor: String?
     private var backingUp = false
+    private var btrfsInfo: BtrfsInfo?
+    private var openMenu: NSMenu?
 
     private var keepAliveEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "keepAlive") as? Bool ?? true }
@@ -137,11 +139,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Menu
 
     func menuWillOpen(_ menu: NSMenu) {
+        openMenu = menu
         refresh()
         rebuild(menu)
+        guard case .mounted = state else { return }
+        DispatchQueue.global().async {
+            let info = fetchBtrfsInfo()
+            DispatchQueue.main.async {
+                guard let info else { return }
+                self.btrfsInfo = info
+                if let menu = self.openMenu { self.rebuild(menu) }
+            }
+        }
     }
 
-    func menuDidClose(_ menu: NSMenu) { activityItem = nil }
+    func menuDidClose(_ menu: NSMenu) {
+        activityItem = nil
+        openMenu = nil
+    }
+
+    private func addSubmenu(to menu: NSMenu, _ title: String, icon: String) -> NSMenu {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+        let sub = NSMenu(title: title)
+        item.submenu = sub
+        menu.addItem(item)
+        return sub
+    }
+
+    private func addHeaderMenu(to menu: NSMenu) {
+        let sub = addSubmenu(to: menu, "LUKS Header", icon: "key.horizontal.fill")
+        add(to: sub, "Back Up…", icon: "square.and.arrow.down", #selector(backupHeader))
+        add(to: sub, "Verify Backup…", icon: "checkmark.shield", #selector(verifyHeader))
+    }
+
+    private func addBtrfsMenu(to menu: NSMenu) {
+        let sub = addSubmenu(to: menu, "Btrfs", icon: "square.stack.3d.up.fill")
+        add(to: sub, "Take Snapshot", icon: "camera.fill", #selector(snapshot))
+        let snaps = addSubmenu(to: sub, "Snapshots (\(btrfsInfo?.snapshots.count ?? 0))", icon: "clock.arrow.circlepath")
+        if let names = btrfsInfo?.snapshots, !names.isEmpty {
+            for name in names {
+                let one = addSubmenu(to: snaps, name, icon: "camera")
+                let open = add(to: one, "Open in Finder", icon: "folder", #selector(openSnapshot(_:)))
+                open.representedObject = name
+                let del = add(to: one, "Delete…", icon: "trash", #selector(deleteSnapshotItem(_:)))
+                del.representedObject = name
+            }
+        } else {
+            add(to: snaps, "None yet", icon: "tray")
+        }
+        sub.addItem(.separator())
+        let running = btrfsInfo?.scrubRunning == true
+        add(to: sub, running ? "Cancel Scrub" : "Check Data Integrity (Scrub)…",
+            icon: running ? "stop.circle" : "waveform.path.ecg", #selector(toggleScrub))
+        add(to: sub, "Scrub: \(btrfsInfo?.scrub ?? "…")", icon: "info.circle")
+    }
 
     @discardableResult
     private func add(to menu: NSMenu, _ title: String, icon: String, _ action: Selector? = nil,
@@ -164,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(to: menu, "\(Config.diskName) locked (\(partition))", icon: "lock.fill")
             menu.addItem(.separator())
             add(to: menu, "Unlock and Mount…", icon: "lock.open.fill", #selector(unlock))
-            add(to: menu, "Back Up LUKS Header…", icon: "key.horizontal.fill", #selector(backupHeader))
+            addHeaderMenu(to: menu)
             add(to: menu, "Eject Drive", icon: "eject.fill", #selector(ejectOnly))
         case .busy(let what):
             add(to: menu, what, icon: "hourglass")
@@ -172,11 +224,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(to: menu, "\(Config.diskName) mounted", icon: "externaldrive.fill.badge.checkmark",
                 tip: Config.mountPoint)
             activityItem = add(to: menu, activityTitle(), icon: "arrow.up.arrow.down")
+            add(to: menu, spaceSummary() ?? "Space unknown", icon: "chart.pie")
+            if let errors = btrfsInfo?.errors {
+                add(to: menu, errors == 0 ? "No drive errors" : "\(errors) drive errors",
+                    icon: errors == 0 ? "checkmark.shield" : "exclamationmark.triangle.fill",
+                    tip: "btrfs device stats: read, write, flush, corruption and generation errors")
+            }
             menu.addItem(.separator())
             add(to: menu, "Open in Finder", icon: "folder.fill", #selector(openFinder))
             add(to: menu, "Lock", icon: "lock.fill", #selector(lock))
             add(to: menu, "Lock and Eject Drive", icon: "eject.fill", #selector(lockAndEject))
-            add(to: menu, "Back Up LUKS Header…", icon: "key.horizontal.fill", #selector(backupHeader))
+            menu.addItem(.separator())
+            addBtrfsMenu(to: menu)
+            addHeaderMenu(to: menu)
             menu.addItem(.separator())
             add(to: menu, keepAliveEnabled ? "Keep-alive on" : "Keep-alive off",
                 icon: keepAliveEnabled ? "heart.fill" : "heart.slash", #selector(toggleKeepAlive))
@@ -303,6 +363,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 case .failure(let error):
                     self.show("Could not back up the header", "\(error)")
                 }
+            }
+        }
+    }
+
+    @objc private func verifyHeader() {
+        guard let partition = drive?.partition, !backingUp else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Verify LUKS Header Backup"
+        panel.message = "Choose the saved header file to compare with the drive."
+        panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        backingUp = true
+        DispatchQueue.global().async {
+            let result = verifyHeaderBackup(partition: partition, file: url)
+            DispatchQueue.main.async {
+                self.backingUp = false
+                switch result {
+                case .matches(let size, let uuid):
+                    self.show("Backup matches", "\(url.lastPathComponent) is identical to the header on the drive (\(size) bytes, LUKS UUID \(uuid)).")
+                case .headerChanged(let uuid):
+                    self.show("Backup is out of date", "Same drive (LUKS UUID \(uuid)), but the header has changed since this backup, for example after a passphrase or key change. Make a new backup.")
+                case .otherDrive(let file, let drive):
+                    self.show("Backup is from another drive", "The file is for LUKS UUID \(file), this drive is \(drive). Do not restore it here.")
+                case .notAHeader:
+                    self.show("Not a LUKS header", "\(url.lastPathComponent) does not look like a LUKS header backup.")
+                case .failed(let text):
+                    self.show("Could not verify", text)
+                }
+            }
+        }
+    }
+
+    private func reloadBtrfs() {
+        DispatchQueue.global().async {
+            let info = fetchBtrfsInfo()
+            DispatchQueue.main.async { if let info { self.btrfsInfo = info } }
+        }
+    }
+
+    @objc private func snapshot() {
+        DispatchQueue.global().async {
+            let result = takeSnapshot()
+            DispatchQueue.main.async {
+                self.reloadBtrfs()
+                if result.ok {
+                    self.show("Snapshot taken", "Read-only snapshot \(result.name) is in \(Config.mountPoint)/.snapshots. It takes almost no space until files change.")
+                } else {
+                    self.show("Could not take a snapshot", result.output)
+                }
+            }
+        }
+    }
+
+    @objc private func openSnapshot(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: Config.mountPoint + "/.snapshots/" + name))
+    }
+
+    @objc private func deleteSnapshotItem(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Delete snapshot \(name)?"
+        alert.informativeText = "The files that exist only in this snapshot are gone for good."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        DispatchQueue.global().async {
+            let result = deleteSnapshot(name)
+            DispatchQueue.main.async {
+                self.reloadBtrfs()
+                if result.status != 0 { self.show("Could not delete the snapshot", result.output) }
+            }
+        }
+    }
+
+    @objc private func toggleScrub() {
+        if btrfsInfo?.scrubRunning == true {
+            DispatchQueue.global().async {
+                let result = cancelScrub()
+                DispatchQueue.main.async {
+                    self.reloadBtrfs()
+                    if result.status != 0 { self.show("Could not cancel the scrub", result.output) }
+                }
+            }
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Check all data on the drive?"
+        alert.informativeText = "A scrub reads everything and verifies the checksums. On a large drive it takes many hours and slows other transfers. Locking the drive stops it."
+        alert.addButton(withTitle: "Start Scrub")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        DispatchQueue.global().async {
+            let result = startScrub()
+            DispatchQueue.main.async {
+                self.reloadBtrfs()
+                if result.status != 0 { self.show("Could not start the scrub", result.output) }
             }
         }
     }

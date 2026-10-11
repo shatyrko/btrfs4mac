@@ -43,9 +43,16 @@ enum HeaderBackupError: Error, CustomStringConvertible {
     }
 }
 
-/// Copies the LUKS header of /dev/<partition> to `destination` (needs root, asks via sudo).
-/// Returns the size of the saved file.
-func backupLUKSHeader(partition: String, to destination: URL) -> Result<Int, HeaderBackupError> {
+/// UUID of the LUKS container (LUKS1 and LUKS2 keep it at offset 168).
+func luksUUID(_ data: Data) -> String? {
+    let bytes = [UInt8](data)
+    guard bytes.count >= 208 else { return nil }
+    let field = bytes[168..<208].prefix { $0 != 0 }
+    return String(decoding: field, as: UTF8.self)
+}
+
+/// Reads the first 32 MiB of /dev/<partition> (needs root, asks via sudo).
+func readHeaderArea(partition: String) -> Result<Data, HeaderBackupError> {
     let fm = FileManager.default
     let temp = URL(fileURLWithPath: Askpass.path).deletingLastPathComponent().appendingPathComponent("header.tmp")
     fm.createFile(atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -73,15 +80,49 @@ func backupLUKSHeader(partition: String, to destination: URL) -> Result<Int, Hea
     } catch {
         return .failure(.read("\(error)"))
     }
+    guard let data = try? Data(contentsOf: temp), !data.isEmpty else { return .failure(.read("empty read")) }
+    return .success(data)
+}
 
-    guard let data = try? Data(contentsOf: temp) else { return .failure(.read("empty read")) }
+/// Copies the LUKS header of /dev/<partition> to `destination`.
+/// Returns the size of the saved file.
+func backupLUKSHeader(partition: String, to destination: URL) -> Result<Int, HeaderBackupError> {
+    let data: Data
+    switch readHeaderArea(partition: partition) {
+    case .success(let d): data = d
+    case .failure(let e): return .failure(e)
+    }
     guard let size = luksHeaderSize(data) else { return .failure(.notLUKS) }
     guard size <= data.count else { return .failure(.tooLarge(size)) }
     do {
         try data.prefix(size).write(to: destination)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     } catch {
         return .failure(.write("\(error.localizedDescription)"))
     }
     return .success(size)
+}
+
+enum VerifyResult {
+    case matches(size: Int, uuid: String)
+    case headerChanged(uuid: String)
+    case otherDrive(file: String, drive: String)
+    case notAHeader
+    case failed(String)
+}
+
+/// Compares a saved header file with the header that is on the drive now.
+func verifyHeaderBackup(partition: String, file: URL) -> VerifyResult {
+    guard let saved = try? Data(contentsOf: file), luksHeaderSize(saved) != nil,
+          let savedUUID = luksUUID(saved) else { return .notAHeader }
+    switch readHeaderArea(partition: partition) {
+    case .failure(let error):
+        return .failed("\(error)")
+    case .success(let disk):
+        let savedSize = saved.count
+        guard let driveUUID = luksUUID(disk), disk.count >= savedSize else { return .failed("The drive has no LUKS header.") }
+        if savedUUID != driveUUID { return .otherDrive(file: savedUUID, drive: driveUUID) }
+        return disk.prefix(savedSize) == saved ? .matches(size: savedSize, uuid: driveUUID)
+                                               : .headerChanged(uuid: driveUUID)
+    }
 }

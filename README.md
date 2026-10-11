@@ -51,3 +51,9 @@ If the drive drops off the bus and comes back under another name (`disk4` → `d
 ## LUKS header backup
 
 "Back Up LUKS Header…" asks where to save, reads the first 32 MiB of the partition with `sudo dd`, finds the real header size in the LUKS metadata (LUKS1 and LUKS2) and saves just that, with mode 0600. This is the same content `cryptsetup luksHeaderBackup` writes, so `cryptsetup luksHeaderRestore` accepts it. Saving onto the drive itself is refused.
+
+## More
+
+- **Verify Backup…** (LUKS Header menu): compares a saved header file with the header on the drive. Reports "matches", "out of date" (same drive, header changed since) or "another drive" (different LUKS UUID).
+- **Space and errors** in the menu: free space from `statfs`, error counters from `btrfs device stats`.
+- **Btrfs menu**: read-only snapshots of the whole volume in `.snapshots` (take, open in Finder, delete) and a scrub (full checksum check of the data, start/cancel, last result). They run `btrfs` inside the anylinuxfs VM through `anylinuxfs vm exec`, which needs a terminal, so the app wraps it in `script`.

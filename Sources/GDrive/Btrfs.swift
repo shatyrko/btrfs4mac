@@ -15,14 +15,17 @@ private let btrfs = "/sbin/btrfs"
 
 struct BtrfsInfo {
     var errors: Int?
-    var scrub: String = "never run"
+    var scrub: String = "Never run"
     var scrubRunning = false
+    var scrubPercent: Double?
     var snapshots: [String] = []
     var subvolumes: [String] = []
 }
 
 func fetchBtrfsInfo() -> BtrfsInfo? {
-    let script = "\(btrfs) device stats \(vmMountPoint); echo ===; \(btrfs) scrub status \(vmMountPoint); echo ===; \(btrfs) subvolume list \(vmMountPoint)"
+    // The VM's root file system is read-only, so btrfs cannot record scrub progress and `scrub status` is
+    // useless; whether a scrub runs is read from the process list instead.
+    let script = "\(btrfs) device stats \(vmMountPoint); echo ===; \(btrfs) subvolume list \(vmMountPoint); echo ===; ps | grep -c '[s]crub start'"
     let result = vmExec(["sh", "-c", script])
     let parts = result.output.components(separatedBy: "===\n")
     guard parts.count == 3 else { return nil }
@@ -35,20 +38,10 @@ func fetchBtrfsInfo() -> BtrfsInfo? {
     }
     if counters > 0 { info.errors = total }
 
-    let status = parts[1]
-    func field(_ name: String) -> String? {
-        status.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { $0.hasPrefix(name + ":") }
-            .map { String($0.dropFirst(name.count + 1)).trimmingCharacters(in: .whitespaces) }
-    }
-    if let state = field("Status") {
-        info.scrubRunning = state == "running"
-        let summary = field("Error summary") ?? ""
-        info.scrub = summary.isEmpty ? state : "\(state), \(summary)"
-    }
+    info.scrubRunning = (Int(parts[2].trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
 
     // Snapshots are the folders under .snapshots that hold snapshot subvolumes.
-    let all = subvolumePaths(parts[2])
+    let all = subvolumePaths(parts[1])
     let names = all.compactMap { path -> String? in
         let pieces = path.split(separator: "/")
         return pieces.count >= 3 && pieces[0] == ".snapshots" ? String(pieces[1]) : nil
@@ -121,7 +114,61 @@ func createSubvolume(_ name: String) -> CommandResult {
     return vmExec([btrfs, "subvolume", "create", vmMountPoint + "/" + name])
 }
 
-func startScrub() -> CommandResult { vmExec([btrfs, "scrub", "start", vmMountPoint]) }
+/// Bytes the scrub has to read ("Total to scrub: 501.09GiB" in `btrfs scrub status`).
+func scrubTotalBytes() -> Double? {
+    let status = vmExec([btrfs, "scrub", "status", vmMountPoint]).output
+    guard let line = status.split(separator: "\n").first(where: { $0.contains("Total to scrub") }) else { return nil }
+    let value = line.split(separator: " ").last.map(String.init) ?? ""
+    guard let match = value.range(of: #"^[0-9.]+"#, options: .regularExpression), let number = Double(value[match]) else { return nil }
+    let unit = String(value[match.upperBound...])
+    let factors: [String: Double] = ["KiB": 1_024, "MiB": 1_048_576, "GiB": 1_073_741_824,
+                                     "TiB": 1_099_511_627_776, "PiB": 1_125_899_906_842_624]
+    return number * (factors[unit] ?? 1)
+}
+
+/// Runs `btrfs scrub start -B` in the foreground inside the VM and reports how it ended.
+final class ScrubRun {
+    private var process: Process?
+    var isRunning: Bool { process?.isRunning == true }
+
+    func start(done: @escaping (String) -> Void) throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+        p.arguments = ["-q", "/dev/null", Config.anylinuxfs, "vm", "exec", "--", btrfs, "scrub", "start", "-B", "-d", vmMountPoint]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        p.environment = environment
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        p.standardInput = FileHandle.nullDevice
+        p.terminationHandler = { _ in
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let text = String(String(decoding: data, as: UTF8.self).unicodeScalars.filter { $0 != "\r" && $0 != "\u{04}" && $0 != "\u{08}" })
+            DispatchQueue.main.async { done(Self.summarize(text)) }
+        }
+        try p.run()
+        process = p
+    }
+
+    /// "Finished · no errors found · 0:52:10", or "Cancelled".
+    static func summarize(_ output: String) -> String {
+        func field(_ name: String) -> String? {
+            output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+                .first { $0.hasPrefix(name + ":") }
+                .map { String($0.dropFirst(name.count + 1)).trimmingCharacters(in: .whitespaces) }
+        }
+        if output.localizedCaseInsensitiveContains("abort") || output.localizedCaseInsensitiveContains("cancel") {
+            return "Cancelled"
+        }
+        guard let status = field("Status") else { return "Ended without a report" }
+        var bits = [status.prefix(1).uppercased() + status.dropFirst()]
+        if let errors = field("Error summary") { bits.append(errors) }
+        if let duration = field("Duration") { bits.append(duration) }
+        return bits.joined(separator: " · ")
+    }
+}
+
 func cancelScrub() -> CommandResult { vmExec([btrfs, "scrub", "cancel", vmMountPoint]) }
 
 func formatBytes(_ bytes: Double) -> String {

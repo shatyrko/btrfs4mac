@@ -12,7 +12,7 @@ It was written for a SanDisk Professional G-DRIVE 22 TB, but nothing in it is sp
 - **One-click eject.** "Eject Drive and Quit" unmounts, stops the VM, ejects the drive and quits, leaving no `anylinuxfs`, `vmnet-helper` or `gvproxy` process behind.
 - **Keep the drive awake.** Many USB drives power themselves off after a minute or so of idle, which kills a mounted volume. While mounted, the app writes and syncs a few bytes every 20 seconds so the drive never idles.
 - **Live dashboard** at the top of the menu: used/free space bar, a 60-second read/write throughput graph with the current rates, a health badge (`btrfs device stats`), and the bytes written and read.
-- **Btrfs tools:** read-only snapshots of the whole volume or of one subvolume (list, open, delete), subvolume list and creation, and a scrub (full checksum check of all data).
+- **Btrfs card:** subvolumes (open, create, snapshot one) and snapshots (open, delete, snapshot everything) as rows with buttons, plus a scrub (full checksum check of all data) with an estimated progress bar and the result of the last run.
 - **LUKS header backup and verify.** Saves the LUKS header to a file you choose and compares a saved file with the drive later.
 - **Recovers from a dropped drive.** If the drive comes back under a new disk name, the dead mount is cleared and the app asks again.
 - **About** shows the app and anylinuxfs versions and tells you when a newer anylinuxfs release exists.
@@ -20,9 +20,10 @@ It was written for a SanDisk Professional G-DRIVE 22 TB, but nothing in it is sp
 <p>
   <img src="docs/dashboard-dark.png" width="330" alt="Dashboard, dark">
   <img src="docs/dashboard-light.png" width="330" alt="Dashboard, light">
+  <img src="docs/btrfs-dark.png" width="330" alt="Btrfs card, dark">
 </p>
 
-*The screenshots are the dashboard card rendered with sample numbers.*
+*The screenshots are the two cards rendered with sample numbers.*
 
 ## Requirements
 
@@ -65,7 +66,7 @@ Restart the app afterwards. The keep-alive interval and the anylinuxfs path are 
 | --- | --- |
 | Drive not plugged in | status only |
 | Locked | Unlock and Mount…, LUKS Header, Eject Drive |
-| Mounted | dashboard, Open in Finder, Lock, Lock and Eject Drive, Btrfs, LUKS Header, Keep Drive Awake, About, Eject Drive and Quit |
+| Mounted | dashboard, Open in Finder, Lock, Lock and Eject Drive, Btrfs, Keep Drive Awake with its LUKS Header submenu, About, Eject Drive and Quit |
 
 Flow: plug the drive in, start the app. It asks for the passphrase at once, mounts the volume and opens Finder. While data moves, the menu bar icon shows ↑ (writing), ↓ (reading) or ↕.
 
@@ -75,6 +76,7 @@ Flow: plug the drive in, start the app. It asks for the passphrase at once, moun
 - **Mount:** `sudo -A --preserve-env=ALFS_PASSPHRASE anylinuxfs mount -w false --ignore-permissions /dev/diskXsY`. The passphrase travels in the environment variable `ALFS_PASSPHRASE`, never on a command line. `sudo` asks for the Mac password through a small askpass helper (a native dialog), written to `~/Library/Application Support/G-Drive/`. `--ignore-permissions` is needed because the Btrfs root directory is owned by root.
 - **Unmount:** `anylinuxfs unmount --wait-for-vm`; **eject:** `diskutil eject`.
 - **Btrfs tools** run `btrfs` inside the VM with `anylinuxfs vm exec`, which needs a terminal, so the app wraps it in `script`.
+- **Scrub:** the VM's root file system is read-only, so btrfs cannot record scrub progress and `btrfs scrub status` shows nothing useful. The app runs `btrfs scrub start -B` in the foreground, tells that a scrub is running from the VM's process list, and estimates progress from the bytes macOS counts as read from the drive against the "Total to scrub" figure. The estimate counts any other reads too, hence the "≈".
 - **LUKS header backup:** reads the first 32 MiB of the partition with `sudo dd`, finds the real header size in the LUKS metadata (LUKS1 and LUKS2) and saves just that, mode 0600. It is the same content `cryptsetup luksHeaderBackup` writes, so `cryptsetup luksHeaderRestore` accepts it.
 - **Snapshots** go to `.snapshots/<time>/` (`_root` for the top level, one entry per subvolume) or `.snapshots/<time>-<name>/` for a single subvolume. A snapshot of the top level alone would hold only empty folders where subvolumes are, so the whole-volume snapshot covers each subvolume too.
 - **Quit** unmounts and stops the VM. Killing the app (`pkill GDrive`) leaves the mount and VM running on purpose, so the app can restart without unmounting.

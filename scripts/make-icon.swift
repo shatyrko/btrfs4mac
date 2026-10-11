@@ -34,66 +34,71 @@ func drawIcon() {
         .draw(in: NSRect(x: body.minX, y: body.midY, width: body.width, height: body.height / 2), angle: -90)
     NSGraphicsContext.restoreGraphicsState()
 
-    // A hard disk: silver platter with rings, a hub and the actuator arm.
-    let center = NSPoint(x: 450, y: 585)
-    let radius: CGFloat = 275
-    let platter = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
-    NSGraphicsContext.saveGraphicsState()
-    softShadow(blur: 34, dy: -18, alpha: 0.45).set()
-    NSColor.white.setFill()
-    platter.fill()
-    NSGraphicsContext.restoreGraphicsState()
-
-    NSGraphicsContext.saveGraphicsState()
-    platter.addClip()
-    NSGradient(colors: [rgb(1, 1, 1), rgb(0.86, 0.90, 0.96), rgb(0.62, 0.69, 0.80)],
-               atLocations: [0, 0.6, 1], colorSpace: .sRGB)!
-        .draw(fromCenter: NSPoint(x: center.x - 50, y: center.y + 60), radius: 10, toCenter: center, radius: radius, options: [])
-    // two soft light wedges, like a polished surface
-    NSColor.white.withAlphaComponent(0.35).setFill()
-    for start in [25.0, 205.0] {
-        let wedge = NSBezierPath()
-        wedge.move(to: center)
-        wedge.appendArc(withCenter: center, radius: radius, startAngle: CGFloat(start), endAngle: CGFloat(start + 38))
-        wedge.close()
-        wedge.fill()
+    // An external drive: a slim aluminium slab seen from above-right, with a status light and a port.
+    func quad(_ points: [NSPoint]) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.move(to: points[0])
+        for point in points.dropFirst() { path.line(to: point) }
+        path.close()
+        return path
     }
-    NSGraphicsContext.restoreGraphicsState()
-
-    // concentric tracks
-    rgb(0.10, 0.26, 0.68, 0.22).setStroke()
-    for r in [215.0, 165.0, 115.0] {
-        let ring = NSBezierPath(ovalIn: NSRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2))
-        ring.lineWidth = 7
-        ring.stroke()
+    func fillRounded(_ path: NSBezierPath, _ gradient: NSGradient, angle: CGFloat, round: CGFloat) {
+        NSGraphicsContext.saveGraphicsState()
+        path.lineWidth = round
+        path.lineJoinStyle = .round
+        path.addClip()
+        gradient.draw(in: path.bounds.insetBy(dx: -round, dy: -round), angle: angle)
+        NSGraphicsContext.restoreGraphicsState()
     }
-    // hub
-    rgb(0.10, 0.20, 0.46, 0.85).setFill()
-    NSBezierPath(ovalIn: NSRect(x: center.x - 62, y: center.y - 62, width: 124, height: 124)).fill()
-    NSColor.white.setFill()
-    NSBezierPath(ovalIn: NSRect(x: center.x - 22, y: center.y - 22, width: 44, height: 44)).fill()
+    // A stroke of the same colour with a round join gives the slab rounded corners.
+    func roundedSolid(_ path: NSBezierPath, _ color: NSColor, round: CGFloat) {
+        color.setFill()
+        color.setStroke()
+        path.lineWidth = round
+        path.lineJoinStyle = .round
+        path.fill()
+        path.stroke()
+    }
 
-    // actuator arm
-    let pivot = NSPoint(x: 745, y: 770)
-    let arm = NSBezierPath()
-    arm.move(to: NSPoint(x: pivot.x + 6, y: pivot.y + 22))
-    arm.line(to: NSPoint(x: 560, y: 640))
-    arm.line(to: NSPoint(x: 530, y: 612))
-    arm.line(to: NSPoint(x: 548, y: 600))
-    arm.line(to: NSPoint(x: pivot.x - 22, y: pivot.y - 10))
-    arm.close()
+    let frontBL = NSPoint(x: 215, y: 470), frontBR = NSPoint(x: 715, y: 470)
+    let frontTL = NSPoint(x: 215, y: 565), frontTR = NSPoint(x: 715, y: 565)
+    let dx: CGFloat = 105, dy: CGFloat = 150
+    let backTL = NSPoint(x: frontTL.x + dx, y: frontTL.y + dy), backTR = NSPoint(x: frontTR.x + dx, y: frontTR.y + dy)
+    let sideBR = NSPoint(x: frontBR.x + dx, y: frontBR.y + dy)
+
+    let top = quad([frontTL, frontTR, backTR, backTL])
+    let front = quad([frontBL, frontBR, frontTR, frontTL])
+    let side = quad([frontBR, sideBR, backTR, frontTR])
+
     NSGraphicsContext.saveGraphicsState()
-    softShadow(blur: 14, dy: -8, alpha: 0.4).set()
-    rgb(0.13, 0.16, 0.27).setFill()
-    arm.fill()
+    softShadow(blur: 36, dy: -22, alpha: 0.5).set()
+    roundedSolid(quad([frontBL, frontBR, sideBR, backTR, backTL, frontTL]), rgb(0.55, 0.62, 0.74), round: 30)
     NSGraphicsContext.restoreGraphicsState()
-    rgb(0.13, 0.16, 0.27).setFill()
-    NSBezierPath(ovalIn: NSRect(x: pivot.x - 36, y: pivot.y - 36, width: 72, height: 72)).fill()
-    rgb(0.70, 0.76, 0.88).setFill()
-    NSBezierPath(ovalIn: NSRect(x: pivot.x - 14, y: pivot.y - 14, width: 28, height: 28)).fill()
+
+    roundedSolid(side, rgb(0.50, 0.57, 0.70), round: 30)
+    roundedSolid(front, rgb(0.72, 0.78, 0.87), round: 30)
+    roundedSolid(top, rgb(0.93, 0.95, 0.98), round: 30)
+    // light falling on the top face
+    NSGraphicsContext.saveGraphicsState()
+    top.addClip()
+    NSGradient(colors: [NSColor.white.withAlphaComponent(0.9), NSColor.white.withAlphaComponent(0)])!
+        .draw(in: top.bounds, angle: 60)
+    NSGraphicsContext.restoreGraphicsState()
+    // darker lower edge of the front face
+    NSGraphicsContext.saveGraphicsState()
+    front.addClip()
+    NSGradient(colors: [rgb(0.55, 0.62, 0.76, 0), rgb(0.55, 0.62, 0.76, 0.55)])!
+        .draw(in: front.bounds, angle: -90)
+    NSGraphicsContext.restoreGraphicsState()
+
+    // status light and port on the front face
+    rgb(0.30, 0.85, 0.45).setFill()
+    NSBezierPath(roundedRect: NSRect(x: 255, y: 508, width: 70, height: 22), xRadius: 11, yRadius: 11).fill()
+    rgb(0.10, 0.17, 0.35, 0.8).setFill()
+    NSBezierPath(roundedRect: NSRect(x: 560, y: 505, width: 110, height: 28), xRadius: 14, yRadius: 14).fill()
 
     // Lock badge.
-    let badge = NSRect(x: 575, y: 215, width: 270, height: 270)
+    let badge = NSRect(x: 600, y: 205, width: 250, height: 250)
     NSGraphicsContext.saveGraphicsState()
     softShadow(blur: 16, dy: -8, alpha: 0.35).set()
     rgb(1.0, 0.78, 0.22).setFill()
@@ -104,12 +109,12 @@ func drawIcon() {
     ink.setFill()
     ink.setStroke()
     let cx = badge.midX
-    NSBezierPath(roundedRect: NSRect(x: cx - 62, y: 282, width: 124, height: 102), xRadius: 20, yRadius: 20).fill()
+    NSBezierPath(roundedRect: NSRect(x: cx - 58, y: 250, width: 116, height: 96), xRadius: 18, yRadius: 18).fill()
     let shackle = NSBezierPath()
-    shackle.move(to: NSPoint(x: cx - 36, y: 380))
-    shackle.line(to: NSPoint(x: cx - 36, y: 412))
-    shackle.appendArc(withCenter: NSPoint(x: cx, y: 412), radius: 36, startAngle: 180, endAngle: 0, clockwise: true)
-    shackle.line(to: NSPoint(x: cx + 36, y: 380))
+    shackle.move(to: NSPoint(x: cx - 34, y: 342))
+    shackle.line(to: NSPoint(x: cx - 34, y: 372))
+    shackle.appendArc(withCenter: NSPoint(x: cx, y: 372), radius: 34, startAngle: 180, endAngle: 0, clockwise: true)
+    shackle.line(to: NSPoint(x: cx + 34, y: 342))
     shackle.lineWidth = 24
     shackle.lineCapStyle = .round
     shackle.stroke()

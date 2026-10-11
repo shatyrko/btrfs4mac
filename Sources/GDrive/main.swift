@@ -23,6 +23,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var missingStrikes = 0
     private var latestRelease: Release?
     private var btrfsInfo: BtrfsInfo?
+    private weak var btrfsCard: BtrfsView?
+    private var btrfsTimer: Timer?
+    private let scrubRun = ScrubRun()
+    private var scrubStartRead: UInt64?
+    private var scrubTotal: Double?
+    private var lastScrub: String {
+        get { UserDefaults.standard.string(forKey: "lastScrub") ?? "Never run" }
+        set { UserDefaults.standard.set(newValue, forKey: "lastScrub") }
+    }
     private var openMenu: NSMenu?
 
     private var keepAliveEnabled: Bool {
@@ -176,18 +185,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         rebuild(menu)
         guard case .mounted = state else { return }
-        DispatchQueue.global().async {
-            let info = fetchBtrfsInfo()
-            DispatchQueue.main.async {
-                guard let info else { return }
-                self.btrfsInfo = info
-                if let menu = self.openMenu { self.rebuild(menu) }
-            }
-        }
+        reloadBtrfs()
+        // Keep the Btrfs card and the health badge fresh while the menu stays open.
+        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in self?.reloadBtrfs() }
+        RunLoop.main.add(timer, forMode: .common)
+        btrfsTimer = timer
     }
 
     func menuDidClose(_ menu: NSMenu) {
         dashboard = nil
+        btrfsCard = nil
+        btrfsTimer?.invalidate()
+        btrfsTimer = nil
         openMenu = nil
     }
 
@@ -208,39 +217,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addBtrfsMenu(to menu: NSMenu) {
         let sub = addSubmenu(to: menu, "Btrfs", icon: "square.stack.3d.up.fill")
-        let subs = addSubmenu(to: sub, "Subvolumes (\(btrfsInfo?.subvolumes.count ?? 0))", icon: "folder.badge.gearshape")
-        if let paths = btrfsInfo?.subvolumes, !paths.isEmpty {
-            for path in paths {
-                let one = addSubmenu(to: subs, path, icon: "folder")
-                let open = add(to: one, "Open in Finder", icon: "folder", #selector(openSubvolume(_:)))
-                open.representedObject = path
-                let snap = add(to: one, "Take Snapshot of \(path)", icon: "camera.fill", #selector(snapshotSubvolume(_:)))
-                snap.representedObject = path
-            }
-        } else {
-            add(to: subs, "None yet", icon: "tray")
+        let card = BtrfsView()
+        // Buttons act once the menu has closed, so dialogs and Finder windows are not left behind it.
+        func later(_ work: @escaping () -> Void) {
+            openMenu?.cancelTracking()
+            DispatchQueue.main.async(execute: work)
         }
-        subs.addItem(.separator())
-        add(to: subs, "New Subvolume…", icon: "plus", #selector(newSubvolume))
-        sub.addItem(.separator())
-        add(to: sub, "Take Snapshot", icon: "camera.fill", #selector(snapshot))
-        let snaps = addSubmenu(to: sub, "Snapshots (\(btrfsInfo?.snapshots.count ?? 0))", icon: "clock.arrow.circlepath")
-        if let names = btrfsInfo?.snapshots, !names.isEmpty {
-            for name in names {
-                let one = addSubmenu(to: snaps, name, icon: "camera")
-                let open = add(to: one, "Open in Finder", icon: "folder", #selector(openSnapshot(_:)))
-                open.representedObject = name
-                let del = add(to: one, "Delete…", icon: "trash", #selector(deleteSnapshotItem(_:)))
-                del.representedObject = name
-            }
-        } else {
-            add(to: snaps, "None yet", icon: "tray")
-        }
-        sub.addItem(.separator())
-        let running = btrfsInfo?.scrubRunning == true
-        add(to: sub, running ? "Cancel Scrub" : "Check Data Integrity (Scrub)…",
-            icon: running ? "stop.circle" : "waveform.path.ecg", #selector(toggleScrub))
-        add(to: sub, "Scrub: \(btrfsInfo?.scrub ?? "…")", icon: "info.circle")
+        card.actions = BtrfsView.Actions(
+            openSubvolume: { path in later { [weak self] in self?.openSubvolume(path) } },
+            snapshotSubvolume: { path in later { [weak self] in self?.runSnapshot(only: path) } },
+            newSubvolume: { later { [weak self] in self?.newSubvolume() } },
+            snapshotAll: { later { [weak self] in self?.runSnapshot(only: nil) } },
+            openSnapshot: { name in later { [weak self] in self?.openSnapshot(name) } },
+            deleteSnapshot: { name in later { [weak self] in self?.confirmDeleteSnapshot(name) } },
+            toggleScrub: { later { [weak self] in self?.toggleScrub() } }
+        )
+        card.update(btrfsInfo)
+        btrfsCard = card
+        let item = NSMenuItem()
+        item.view = card
+        sub.addItem(item)
     }
 
     @discardableResult
@@ -281,7 +277,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(to: menu, "Lock and Eject Drive", icon: "eject.fill", #selector(lockAndEject))
             menu.addItem(.separator())
             addBtrfsMenu(to: menu)
-            addHeaderMenu(to: menu)
             menu.addItem(.separator())
             let keep = add(to: menu, "Keep Drive Awake", icon: "heart.fill", #selector(toggleKeepAlive),
                            tip: "Writes a few bytes every \(Int(Config.keepAliveInterval)) s so the drive never idles; on by default")
@@ -289,6 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let status = keepAliveStatus()
             add(to: menu, status.text, icon: status.ok ? "checkmark.circle" : "exclamationmark.triangle",
                 tip: status.tip)
+            addHeaderMenu(to: menu)
         }
         menu.addItem(.separator())
         add(to: menu, "Forget Saved Passphrase", icon: "key.slash",
@@ -459,16 +455,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func reloadBtrfs() {
         DispatchQueue.global().async {
             let info = fetchBtrfsInfo()
-            DispatchQueue.main.async { if let info { self.btrfsInfo = info } }
+            DispatchQueue.main.async {
+                guard var info else { return }
+                self.applyScrub(to: &info)
+                self.btrfsInfo = info
+                self.btrfsCard?.update(info)
+                self.dashboard?.data = self.dashboardData()
+            }
         }
     }
-
-    @objc private func snapshotSubvolume(_ sender: NSMenuItem) {
-        guard let path = sender.representedObject as? String else { return }
-        runSnapshot(only: path)
-    }
-
-    @objc private func snapshot() { runSnapshot(only: nil) }
 
     private func runSnapshot(only: String?) {
         DispatchQueue.global().async {
@@ -484,12 +479,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func openSubvolume(_ sender: NSMenuItem) {
-        guard let path = sender.representedObject as? String else { return }
+    private func openSubvolume(_ path: String) {
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.mountPoint + "/" + path))
     }
 
-    @objc private func newSubvolume() {
+    private func newSubvolume() {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "New subvolume"
@@ -510,13 +504,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func openSnapshot(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
+    private func openSnapshot(_ name: String) {
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.mountPoint + "/.snapshots/" + name))
     }
 
-    @objc private func deleteSnapshotItem(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
+    private func confirmDeleteSnapshot(_ name: String) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Delete snapshot \(name)?"
@@ -533,8 +525,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func toggleScrub() {
-        if btrfsInfo?.scrubRunning == true {
+    /// btrfs cannot report scrub progress inside the VM, so it is estimated from the bytes read from the drive.
+    private func applyScrub(to info: inout BtrfsInfo) {
+        guard info.scrubRunning || scrubRun.isRunning else {
+            info.scrub = lastScrub
+            return
+        }
+        info.scrubRunning = true
+        var bits = ["Running"]
+        if let start = scrubStartRead, let total = scrubTotal, total > 0,
+           let now = sampler.totals?.read, now >= start {
+            let done = Double(now - start)
+            let percent = min(done / total * 100, 99.9)
+            info.scrubPercent = percent
+            bits.append(String(format: "≈%.0f%%", percent))
+            if case .active(let rate, _) = activity, rate > 1_000_000 {
+                bits.append(formatRate(rate))
+                let minutes = max(Int((total - done) / rate / 60), 1)
+                bits.append(minutes >= 60 ? "~\(minutes / 60) h \(minutes % 60) min left" : "~\(minutes) min left")
+            }
+        }
+        info.scrub = bits.joined(separator: " · ")
+    }
+
+    private func toggleScrub() {
+        if btrfsInfo?.scrubRunning == true || scrubRun.isRunning {
             DispatchQueue.global().async {
                 let result = cancelScrub()
                 DispatchQueue.main.async {
@@ -547,15 +562,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Check all data on the drive?"
-        alert.informativeText = "A scrub reads everything and verifies the checksums. On a large drive it takes many hours and slows other transfers. Locking the drive stops it."
+        alert.informativeText = "A scrub reads everything and verifies the checksums. On a large drive it takes hours and slows other transfers. Locking the drive stops it."
         alert.addButton(withTitle: "Start Scrub")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let startRead = sampler.totals?.read
         DispatchQueue.global().async {
-            let result = startScrub()
+            let total = scrubTotalBytes()
             DispatchQueue.main.async {
-                self.reloadBtrfs()
-                if result.status != 0 { self.show("Could not start the scrub", result.output) }
+                self.scrubTotal = total
+                self.scrubStartRead = startRead
+                do {
+                    try self.scrubRun.start { summary in
+                        self.scrubStartRead = nil
+                        let when = DateFormatter()
+                        when.dateStyle = .medium
+                        when.timeStyle = .short
+                        self.lastScrub = summary + " · " + when.string(from: Date())
+                        log("scrub: \(self.lastScrub)")
+                        self.reloadBtrfs()
+                    }
+                    log("scrub started")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.reloadBtrfs() }
+                } catch {
+                    self.show("Could not start the scrub", "\(error)")
+                }
             }
         }
     }

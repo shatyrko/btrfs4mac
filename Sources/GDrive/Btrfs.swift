@@ -22,10 +22,10 @@ struct BtrfsInfo {
 }
 
 func fetchBtrfsInfo() -> BtrfsInfo? {
-    let script = "\(btrfs) device stats \(vmMountPoint); echo ===; \(btrfs) scrub status \(vmMountPoint); echo ===; ls -1 \(snapshotDir) 2>/dev/null; echo ===; \(btrfs) subvolume list \(vmMountPoint)"
+    let script = "\(btrfs) device stats \(vmMountPoint); echo ===; \(btrfs) scrub status \(vmMountPoint); echo ===; \(btrfs) subvolume list \(vmMountPoint)"
     let result = vmExec(["sh", "-c", script])
     let parts = result.output.components(separatedBy: "===\n")
-    guard parts.count == 4 else { return nil }
+    guard parts.count == 3 else { return nil }
 
     var info = BtrfsInfo()
     var total = 0
@@ -47,10 +47,14 @@ func fetchBtrfsInfo() -> BtrfsInfo? {
         info.scrub = summary.isEmpty ? state : "\(state), \(summary)"
     }
 
-    info.snapshots = parts[2].split(separator: "\n").map(String.init)
-        .filter { $0.range(of: "^[0-9A-Za-z_-]+$", options: .regularExpression) != nil }
-        .sorted(by: >)
-    info.subvolumes = subvolumePaths(parts[3]).filter { !$0.hasPrefix(".snapshots/") }.sorted()
+    // Snapshots are the folders under .snapshots that hold snapshot subvolumes.
+    let all = subvolumePaths(parts[2])
+    let names = all.compactMap { path -> String? in
+        let pieces = path.split(separator: "/")
+        return pieces.count >= 3 && pieces[0] == ".snapshots" ? String(pieces[1]) : nil
+    }
+    info.snapshots = Array(Set(names)).filter { $0.range(of: safeName, options: .regularExpression) != nil }.sorted(by: >)
+    info.subvolumes = all.filter { !$0.hasPrefix(".snapshots/") }.sorted()
     return info
 }
 
@@ -66,19 +70,28 @@ private let safeSubvolumeName = "^[0-9A-Za-z_][0-9A-Za-z_.-]*$"
 
 /// Snapshots the top level and every subvolume (a snapshot of the top level alone
 /// holds only empty folders where subvolumes are) into .snapshots/<time>/.
-func takeSnapshot() -> (ok: Bool, name: String, output: String) {
+/// With `only`, snapshots just that subvolume into .snapshots/<time>-<name>/.
+func takeSnapshot(only: String? = nil) -> (ok: Bool, name: String, output: String) {
     let f = DateFormatter()
     f.dateFormat = "yyyy-MM-dd_HHmmss"
-    let name = f.string(from: Date())
+    var name = f.string(from: Date())
+    var targets = [(source: String, label: String)]()
+    if let only {
+        let label = String(only.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" })
+        name += "-" + label
+        targets = [(vmMountPoint + "/" + only, label)]
+    }
     let dir = snapshotDir + "/" + name
     let mk = vmExec(["mkdir", "-p", dir])
     guard mk.status == 0 else { return (false, name, mk.output) }
 
-    let list = vmExec([btrfs, "subvolume", "list", vmMountPoint])
-    let subvolumes = subvolumePaths(list.output).filter { !$0.hasPrefix(".snapshots/") }
-    var targets = [(source: vmMountPoint, label: "_root")]
-    for path in subvolumes {
-        targets.append((vmMountPoint + "/" + path, path.replacingOccurrences(of: "/", with: "__")))
+    if only == nil {
+        let list = vmExec([btrfs, "subvolume", "list", vmMountPoint])
+        let subvolumes = subvolumePaths(list.output).filter { !$0.hasPrefix(".snapshots/") }
+        targets = [(vmMountPoint, "_root")]
+        for path in subvolumes {
+            targets.append((vmMountPoint + "/" + path, path.replacingOccurrences(of: "/", with: "__")))
+        }
     }
     for target in targets {
         let snap = vmExec([btrfs, "subvolume", "snapshot", "-r", target.source, dir + "/" + target.label])

@@ -196,8 +196,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let subs = addSubmenu(to: sub, "Subvolumes (\(btrfsInfo?.subvolumes.count ?? 0))", icon: "folder.badge.gearshape")
         if let paths = btrfsInfo?.subvolumes, !paths.isEmpty {
             for path in paths {
-                let item = add(to: subs, path, icon: "folder", #selector(openSubvolume(_:)))
-                item.representedObject = path
+                let one = addSubmenu(to: subs, path, icon: "folder")
+                let open = add(to: one, "Open in Finder", icon: "folder", #selector(openSubvolume(_:)))
+                open.representedObject = path
+                let snap = add(to: one, "Take Snapshot of \(path)", icon: "camera.fill", #selector(snapshotSubvolume(_:)))
+                snap.representedObject = path
             }
         } else {
             add(to: subs, "None yet", icon: "tray")
@@ -456,13 +459,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func snapshot() {
+    @objc private func snapshotSubvolume(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        runSnapshot(only: path)
+    }
+
+    @objc private func snapshot() { runSnapshot(only: nil) }
+
+    private func runSnapshot(only: String?) {
         DispatchQueue.global().async {
-            let result = takeSnapshot()
+            let result = takeSnapshot(only: only)
             DispatchQueue.main.async {
                 self.reloadBtrfs()
                 if result.ok {
-                    self.show("Snapshot taken", "Read-only snapshot \(result.name) of the volume and all its subvolumes is in \(Config.mountPoint)/.snapshots. It takes almost no space until files change.")
+                    self.show("Snapshot taken", "Read-only snapshot \(result.name) of \(only ?? "the volume and all its subvolumes") is in \(Config.mountPoint)/.snapshots. It takes almost no space until files change.")
                 } else {
                     self.show("Could not take a snapshot", result.output)
                 }

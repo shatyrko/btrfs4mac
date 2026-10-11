@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "GDrive",
+    name: "btrfs4mac",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "GDrive", path: "Sources/GDrive")
+        .executableTarget(name: "btrfs4mac", path: "Sources/btrfs4mac")
     ]
 )

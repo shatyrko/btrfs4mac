@@ -4,7 +4,7 @@ import Foundation
 /// idle timer never expires. The sync matters: without it the write stays in
 /// the VM's page cache and never reaches the disk.
 final class KeepAlive {
-    private let queue = DispatchQueue(label: "g-drive.keepalive")
+    private let queue = DispatchQueue(label: "btrfs4mac.keepalive")
     private var timer: DispatchSourceTimer?
     private(set) var lastOK: Date?
     private(set) var lastError: String?

@@ -11,7 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let keepAlive = KeepAlive()
     private var state: State = .notConnected
-    private var drive: (disk: String, partition: String)?
+    private var drive: DriveInfo?
+    private var driveChoices: [DriveInfo] = []
     private var sampler = ActivitySampler()
     private var activity: ActivitySampler.Activity = .idle
     private var dashboard: DashboardView?
@@ -38,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private var openMenu: NSMenu?
 
+    private var driveName: String { drive?.name ?? Config.pinnedDiskName ?? "Drive" }
+
     private var keepAliveEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "keepAlive") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "keepAlive") }
@@ -47,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        migrateFromGDrive()
         Askpass.install()
         log("started \(Versions.app) (\(Versions.build))")
         checkForUpdates()
@@ -67,9 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global().async {
             let mounted = isMounted()
             let device = mounted ? mountedDevice() : nil
-            let found = findDrive()
+            let all = findDrives()
+            var found: DriveInfo?
+            if let pinned = Config.pinnedDiskName { found = all.first { $0.name == pinned } } else { found = all.first }
             let space = mounted ? spaceNumbers() : nil
             DispatchQueue.main.async {
+                self.driveChoices = all
                 if case .busy = self.state { return }
                 if mounted {
                     // A mount is dead when the drive came back under another name (sure sign),
@@ -150,6 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func dashboardData() -> DashboardData {
         var d = DashboardData()
+        d.name = driveName
+        d.mountPoint = Config.mountPoint
         if let space {
             d.total = space.size
             d.used = max(space.size - space.free, 0)
@@ -171,7 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .busy: symbol = "hourglass"
         case .mounted: symbol = "externaldrive.fill"
         }
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "G-Drive")
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "btrfs4mac")
         image?.isTemplate = true
         statusItem.button?.image = image
 
@@ -211,6 +220,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.submenu = sub
         menu.addItem(item)
         return sub
+    }
+
+    /// Only shown when more than one drive could be the Btrfs one.
+    private func addDriveChooser(to menu: NSMenu) {
+        guard driveChoices.count > 1 || (driveChoices.count == 1 && drive == nil) else { return }
+        let sub = addSubmenu(to: menu, "Choose Drive", icon: "externaldrive")
+        for choice in driveChoices {
+            let item = add(to: sub, "\(choice.name) · \(formatBytes(choice.size)) · \(choice.partition)",
+                           icon: "externaldrive.fill", #selector(chooseDrive(_:)))
+            item.representedObject = choice.name
+            item.state = choice.partition == drive?.partition ? .on : .off
+        }
+    }
+
+    @objc private func chooseDrive(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(name, forKey: "diskName")
+        promptedFor = nil
+        refresh()
     }
 
     private func addHeaderMenu(to menu: NSMenu) {
@@ -259,9 +287,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         switch state {
         case .notConnected:
-            add(to: menu, "\(Config.diskName) not connected", icon: "externaldrive.badge.xmark")
+            add(to: menu, Config.pinnedDiskName.map { "\($0) not connected" } ?? "No Btrfs drive found",
+                icon: "externaldrive.badge.xmark")
+            addDriveChooser(to: menu)
         case .locked(let partition, _):
-            add(to: menu, "\(Config.diskName) locked (\(partition))", icon: "lock.fill")
+            add(to: menu, "\(driveName) locked (\(partition))", icon: "lock.fill")
+            addDriveChooser(to: menu)
             menu.addItem(.separator())
             add(to: menu, "Unlock and Mount…", icon: "lock.open.fill", #selector(unlock))
             addHeaderMenu(to: menu)
@@ -293,7 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         add(to: menu, "Forget Saved Passphrase", icon: "key.slash",
             Keychain.load() != nil ? #selector(forgetPassphrase) : nil)
-        add(to: menu, "About G-Drive…", icon: "info.circle", #selector(about))
+        add(to: menu, "About btrfs4mac…", icon: "info.circle", #selector(about))
         var quitTitle = "Quit"
         if case .notConnected = state {} else { quitTitle = "Eject Drive and Quit" }
         add(to: menu, quitTitle, icon: "eject.circle", #selector(quit),
@@ -402,8 +433,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let day = ISO8601DateFormatter().string(from: Date()).prefix(10)
         let panel = NSSavePanel()
         panel.title = "Back Up LUKS Header"
-        panel.message = "Where do you want to back up the LUKS header of \(Config.diskName)? Keep it off this drive."
-        panel.nameFieldStringValue = "\(Config.diskName)-luks-header-\(day).img"
+        panel.message = "Where do you want to back up the LUKS header of \(driveName)? Keep it off this drive."
+        panel.nameFieldStringValue = "\(driveName)-luks-header-\(day).img".replacingOccurrences(of: " ", with: "-")
         panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
         panel.canCreateDirectories = true
         NSApp.activate(ignoringOtherApps: true)
@@ -625,7 +656,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Quitting unmounts the volume, stops the VM and ejects the drive, so nothing is left running.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if case .busy = state {
-            show("G-Drive is busy", "Wait for the current step to finish, then quit.")
+            show("btrfs4mac is busy", "Wait for the current step to finish, then quit.")
             return .terminateCancel
         }
         let disk = drive?.disk ?? findDrive()?.disk
@@ -710,7 +741,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
-            alert.messageText = "G-Drive \(Versions.app)"
+            alert.messageText = "btrfs4mac \(Versions.app)"
             alert.informativeText = "Build \(Versions.build)\n\nLinux VM (microVM): \(vm)"
             alert.addButton(withTitle: "OK")
             if updateAvailable != nil { alert.addButton(withTitle: "Release Page") }
@@ -723,7 +754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func askPassphrase() -> (passphrase: String, remember: Bool)? {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Unlock \(Config.diskName)"
+        alert.messageText = "Unlock \(driveName)"
         alert.informativeText = "LUKS passphrase:"
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 28, width: 280, height: 24))
         let check = NSButton(checkboxWithTitle: "Remember in Keychain", target: nil, action: nil)

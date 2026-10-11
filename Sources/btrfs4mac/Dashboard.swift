@@ -1,8 +1,8 @@
 import AppKit
 
 struct DashboardData {
-    var name = Config.diskName
-    var mountPoint = Config.mountPoint
+    var name = "Drive"
+    var mountPoint = ""
     var used: Double = 0
     var total: Double = 0
     var errors: Int?

@@ -9,8 +9,9 @@ func vmExec(_ argv: [String]) -> CommandResult {
     return CommandResult(status: result.status, output: cleaned.hasPrefix("^D") ? String(cleaned.dropFirst(2)) : cleaned)
 }
 
-let vmMountPoint = "/mnt/" + (Config.mountPoint as NSString).lastPathComponent
-let snapshotDir = vmMountPoint + "/.snapshots"
+/// The mounted volume as the VM sees it, e.g. /mnt/backup.
+var vmMountPoint: String { activeMount?.vmPath ?? "/mnt/backup" }
+var snapshotDir: String { vmMountPoint + "/.snapshots" }
 private let btrfs = "/sbin/btrfs"
 
 struct BtrfsInfo {

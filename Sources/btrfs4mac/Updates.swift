@@ -1,8 +1,8 @@
 import Foundation
 
-/// Appends a timestamped line to ~/Library/Logs/G-Drive.log, so automatic actions can be explained later.
+/// Appends a timestamped line to ~/Library/Logs/btrfs4mac.log, so automatic actions can be explained later.
 func log(_ message: String) {
-    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/G-Drive.log")
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/btrfs4mac.log")
     let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
     if let handle = try? FileHandle(forWritingTo: url) {
         handle.seekToEndOfFile()
@@ -19,7 +19,7 @@ enum Versions {
     }
 
     static var build: String {
-        Bundle.main.object(forInfoDictionaryKey: "GDriveCommit") as? String ?? "dev"
+        Bundle.main.object(forInfoDictionaryKey: "Btrfs4MacCommit") as? String ?? "dev"
     }
 
     /// "0.20.1" from `anylinuxfs --version`.
@@ -39,7 +39,7 @@ struct Release {
 func fetchLatestRelease(done: @escaping (Release?) -> Void) {
     var request = URLRequest(url: URL(string: "https://api.github.com/repos/nohajc/anylinuxfs/releases/latest")!)
     request.timeoutInterval = 15
-    request.setValue("g-drive", forHTTPHeaderField: "User-Agent")
+    request.setValue("btrfs4mac", forHTTPHeaderField: "User-Agent")
     URLSession.shared.dataTask(with: request) { data, _, _ in
         var release: Release?
         if let data,

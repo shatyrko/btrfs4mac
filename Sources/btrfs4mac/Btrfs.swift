@@ -24,15 +24,41 @@ struct BtrfsInfo {
     /// Bytes per subvolume, from `btrfs filesystem du`; filled in by the app, which caches it.
     var sizes: [String: Double] = [:]
     var sizesBusy = false
+    /// Bytes the VM has read from the drive since it booted (scrub progress is measured with it).
+    var vmReadBytes: Double?
+    var vmUptime: Double?
+    /// Value of that counter when the app started the current scrub (kept in the VM, so it dies with it).
+    var scrubBase: Double?
+    var scrubEvents: [ScrubEvent] = []
+    /// Kernel-log times of checksum errors and failed repairs.
+    var scrubErrorTimes: [Double] = []
 }
+
+/// A line of the VM's kernel log about scrubbing; `at` is seconds since the VM booted.
+struct ScrubEvent {
+    enum Kind { case started, finished(Int), notFinished(Int) }
+    let at: Double
+    let kind: Kind
+}
+
+let scrubBaseFile = "/tmp/btrfs4mac-scrub-base"
 
 func fetchBtrfsInfo() -> BtrfsInfo? {
     // The VM's root file system is read-only, so btrfs cannot record scrub progress and `scrub status` is
-    // useless; whether a scrub runs is read from the process list instead.
-    let script = "\(btrfs) device stats \(vmMountPoint); echo ===; \(btrfs) subvolume list \(vmMountPoint); echo ===; ps | grep -c '[s]crub start'"
+    // useless. What is used instead: the process list (is one running), the VM's read counter for the
+    // drive (progress) and the kernel log (when scrubs started, finished or were cancelled).
+    let script = [
+        "\(btrfs) device stats \(vmMountPoint)",
+        "\(btrfs) subvolume list \(vmMountPoint)",
+        "ps | grep -c '[s]crub start'",
+        "awk '{print $3*512}' /sys/block/vda/stat",
+        "cut -d' ' -f1 /proc/uptime",
+        "cat \(scrubBaseFile) 2>/dev/null",
+        "dmesg | grep -E 'scrub: (started|finished|not finished)|checksum error|csum failed|unable to fixup'"
+    ].joined(separator: "; echo ===; ")
     let result = vmExec(["sh", "-c", script])
     let parts = result.output.components(separatedBy: "===\n")
-    guard parts.count == 3 else { return nil }
+    guard parts.count == 7 else { return nil }
 
     var info = BtrfsInfo()
     var total = 0
@@ -43,6 +69,10 @@ func fetchBtrfsInfo() -> BtrfsInfo? {
     if counters > 0 { info.errors = total }
 
     info.scrubRunning = (Int(parts[2].trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
+    info.vmReadBytes = Double(parts[3].trimmingCharacters(in: .whitespacesAndNewlines))
+    info.vmUptime = Double(parts[4].trimmingCharacters(in: .whitespacesAndNewlines))
+    info.scrubBase = Double(parts[5].trimmingCharacters(in: .whitespacesAndNewlines))
+    (info.scrubEvents, info.scrubErrorTimes) = parseScrubLog(parts[6])
 
     // Snapshots are the folders under .snapshots that hold snapshot subvolumes.
     let all = subvolumePaths(parts[1])
@@ -53,6 +83,55 @@ func fetchBtrfsInfo() -> BtrfsInfo? {
     info.snapshots = Array(Set(names)).filter { $0.range(of: safeName, options: .regularExpression) != nil }.sorted(by: >)
     info.subvolumes = all.filter { !$0.hasPrefix(".snapshots/") }.sorted()
     return info
+}
+
+/// "[ 2271.51] BTRFS info (device dm-0): scrub: started on devid 1" and friends.
+func parseScrubLog(_ text: String) -> ([ScrubEvent], [Double]) {
+    var events: [ScrubEvent] = []
+    var errors: [Double] = []
+    for line in text.split(separator: "\n") {
+        guard let close = line.firstIndex(of: "]"), line.hasPrefix("["),
+              let at = Double(line[line.index(after: line.startIndex)..<close].trimmingCharacters(in: .whitespaces)) else { continue }
+        func status() -> Int {
+            line.range(of: "status: ").flatMap { Int(line[$0.upperBound...].trimmingCharacters(in: .whitespaces)) } ?? 0
+        }
+        if line.contains("scrub: started") {
+            events.append(ScrubEvent(at: at, kind: .started))
+        } else if line.contains("scrub: not finished") {
+            events.append(ScrubEvent(at: at, kind: .notFinished(status())))
+        } else if line.contains("scrub: finished") {
+            events.append(ScrubEvent(at: at, kind: .finished(status())))
+        } else {
+            errors.append(at)
+        }
+    }
+    return (events, errors)
+}
+
+/// How the most recent scrub that has ended went, and when ("Finished · no errors found · 0:36").
+func lastScrubResult(_ info: BtrfsInfo) -> (text: String, date: Date)? {
+    guard let uptime = info.vmUptime,
+          let endIndex = info.scrubEvents.lastIndex(where: { if case .started = $0.kind { return false }; return true })
+    else { return nil }
+    let end = info.scrubEvents[endIndex]
+    let start = info.scrubEvents[..<endIndex].last(where: { if case .started = $0.kind { return true }; return false })
+    let date = Date().addingTimeInterval(end.at - uptime)
+
+    var text: String
+    switch end.kind {
+    case .finished(0):
+        let errors = info.scrubErrorTimes.filter { $0 >= (start?.at ?? 0) && $0 <= end.at }.count
+        text = errors == 0 ? "Finished · no errors found" : "Finished · \(errors) error \(errors == 1 ? "message" : "messages") in the log"
+    case .finished(let status): text = "Failed (status \(status))"
+    case .notFinished(-125): text = "Cancelled"
+    case .notFinished(let status): text = "Stopped (status \(status))"
+    case .started: return nil
+    }
+    if let start, case .finished = end.kind {
+        let seconds = Int(end.at - start.at)
+        text += String(format: " · %d:%02d h", seconds / 3600, seconds % 3600 / 60)
+    }
+    return (text, date)
 }
 
 /// Paths from `btrfs subvolume list` ("ID 256 gen 7 top level 5 path name").
@@ -130,7 +209,13 @@ func scrubTotalBytes() -> Double? {
     return number * (factors[unit] ?? 1)
 }
 
-/// Runs `btrfs scrub start -B` in the foreground inside the VM and reports how it ended.
+/// Remembers how much the VM had read when the scrub began (a file in the VM's /tmp, which a VM restart clears).
+func recordScrubBase() {
+    _ = vmExec(["sh", "-c", "awk '{print $3*512}' /sys/block/vda/stat > \(scrubBaseFile)"])
+}
+
+/// Runs `btrfs scrub start -B` in the foreground inside the VM. The scrub goes on inside the VM even if
+/// the app quits; how it ended is read from the kernel log afterwards.
 final class ScrubRun {
     private var process: Process?
     var isRunning: Bool { process?.isRunning == true }

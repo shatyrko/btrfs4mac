@@ -32,11 +32,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sizesFetchedAt: Date?
     private var sizesBusy = false
     private let scrubRun = ScrubRun()
-    private var scrubStartRead: UInt64?
     private var scrubTotal: Double?
+    private var scrubTotalFetching = false
     private var lastScrub: String {
         get { UserDefaults.standard.string(forKey: "lastScrub") ?? "Never run" }
         set { UserDefaults.standard.set(newValue, forKey: "lastScrub") }
+    }
+    private var lastScrubStamp: Double {
+        get { UserDefaults.standard.double(forKey: "lastScrubStamp") }
+        set { UserDefaults.standard.set(newValue, forKey: "lastScrubStamp") }
     }
     private var openMenu: NSMenu?
 
@@ -592,21 +596,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// btrfs cannot report scrub progress inside the VM, so it is estimated from the bytes read from the drive.
+    /// btrfs cannot report scrub progress inside the VM, so it is measured with the VM's own counter of bytes
+    /// read from the drive, and the history comes from the VM's kernel log. None of it depends on this app
+    /// having started the scrub or having stayed open.
     private func applyScrub(to info: inout BtrfsInfo) {
         guard info.scrubRunning || scrubRun.isRunning else {
+            scrubTotal = nil
+            if let result = lastScrubResult(info), result.date.timeIntervalSince1970 > lastScrubStamp + 1 {
+                let when = DateFormatter()
+                when.dateStyle = .medium
+                when.timeStyle = .short
+                lastScrub = result.text + " · " + when.string(from: result.date)
+                lastScrubStamp = result.date.timeIntervalSince1970
+                log("scrub: \(lastScrub)")
+            }
             info.scrub = lastScrub
             return
         }
         info.scrubRunning = true
         var bits = ["Running"]
-        if let start = scrubStartRead, let total = scrubTotal, total > 0,
-           let now = sampler.totals?.read, now >= start {
-            let done = Double(now - start)
+
+        if scrubTotal == nil, !scrubTotalFetching {
+            scrubTotalFetching = true
+            DispatchQueue.global().async {
+                let total = scrubTotalBytes()
+                DispatchQueue.main.async {
+                    self.scrubTotal = total
+                    self.scrubTotalFetching = false
+                    self.reloadBtrfs()
+                }
+            }
+        }
+        if let total = scrubTotal, total > 0, let read = info.vmReadBytes {
+            let done = max(read - (info.scrubBase ?? 0), 0)
             let percent = min(done / total * 100, 99.9)
             info.scrubPercent = percent
             bits.append(String(format: "≈%.0f%%", percent))
-            if case .active(let rate, _) = activity, rate > 1_000_000 {
+            let started = info.scrubEvents.last(where: { if case .started = $0.kind { return true }; return false })
+            if let started, let uptime = info.vmUptime, uptime - started.at > 20, done > 0 {
+                let rate = done / (uptime - started.at)
                 bits.append(formatRate(rate))
                 let minutes = max(Int((total - done) / rate / 60), 1)
                 bits.append(minutes >= 60 ? "~\(minutes / 60) h \(minutes % 60) min left" : "~\(minutes) min left")
@@ -633,22 +661,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Start Scrub")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let startRead = sampler.totals?.read
         DispatchQueue.global().async {
             let total = scrubTotalBytes()
+            recordScrubBase()
             DispatchQueue.main.async {
                 self.scrubTotal = total
-                self.scrubStartRead = startRead
                 do {
-                    try self.scrubRun.start { summary in
-                        self.scrubStartRead = nil
-                        let when = DateFormatter()
-                        when.dateStyle = .medium
-                        when.timeStyle = .short
-                        self.lastScrub = summary + " · " + when.string(from: Date())
-                        log("scrub: \(self.lastScrub)")
-                        self.reloadBtrfs()
-                    }
+                    try self.scrubRun.start { _ in self.reloadBtrfs() }
                     log("scrub started")
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.reloadBtrfs() }
                 } catch {

@@ -14,6 +14,7 @@ It works with **any external drive**, whatever the make: the drive is found auto
 - **One-click unlock and mount.** Finds the drive, asks for the LUKS passphrase (optionally remembers it in the Keychain), mounts the volume, opens Finder.
 - **One-click eject.** "Eject Drive and Quit" unmounts, stops the VM, ejects the drive and quits, leaving no `anylinuxfs`, `vmnet-helper` or `gvproxy` process behind.
 - **Keep the drive awake.** Many USB drives power themselves off after a minute or so of idle, which kills a mounted volume. While mounted, the app writes and syncs a few bytes every 20 seconds so the drive never idles.
+- **Drive power at a glance.** The menu shows what macOS will do to an idle disk on its own (`pmset` `disksleep`, 0 = never), which pulls against the keep-alive, and **Check Spin State…** times reads of random sectors on the raw disk to tell you whether the drive is spinning right now: milliseconds means it is, seconds mean it was parked and the check just woke it.
 - **Live dashboard** at the top of the menu: the mount point, the drive's vendor, model, capacity, USB link speed and serial number, a used/free space bar, a 60-second read/write throughput graph with the current rates, a health badge (`btrfs device stats`, see "What \"No errors\" means"), and the bytes written and read.
 - **Btrfs card** in the main menu: every subvolume with its size (open, create, snapshot one) and snapshots (open, delete, snapshot everything) as rows with buttons, plus a scrub (full checksum check of all data) with an estimated progress bar and the result of the last run.
 - **LUKS header backup and verify.** Saves the LUKS header to a file you choose and compares a saved file with the drive later.
@@ -88,8 +89,8 @@ Restart the app afterwards. The keep-alive interval and the anylinuxfs path are 
 | State | Items |
 | --- | --- |
 | Drive not plugged in | status only |
-| Locked | Unlock and Mount…, LUKS Header, Eject Drive |
-| Mounted | dashboard, Open in Finder, Lock, Lock and Eject Drive, the Btrfs card (subvolumes with sizes, snapshots, data check), Keep Drive Awake with its LUKS Header submenu, About, Eject Drive and Quit |
+| Locked | Unlock and Mount…, LUKS Header, Eject Drive, macOS disk sleep, Check Spin State… |
+| Mounted | dashboard, Open in Finder, Lock, Lock and Eject Drive, the Btrfs card (subvolumes with sizes, snapshots, data check), Keep Drive Awake, macOS disk sleep, Check Spin State…, LUKS Header submenu, About, Eject Drive and Quit |
 
 Flow: plug the drive in, start the app. It asks for the passphrase at once, mounts the volume and opens Finder. While data moves, the menu bar icon shows ↑ (writing), ↓ (reading) or ↕.
 
@@ -101,6 +102,7 @@ Flow: plug the drive in, start the app. It asks for the passphrase at once, moun
 - **Btrfs tools** run `btrfs` inside the VM with `anylinuxfs vm exec`, which needs a terminal, so the app wraps it in `script`.
 - **Scrub:** the VM's root file system is read-only, so btrfs cannot record scrub progress and `btrfs scrub status` shows nothing useful. The app runs `btrfs scrub start -B` in the foreground of a `vm exec` session; the scrub keeps going inside the VM if the app quits. Whether one is running comes from the VM's process list, progress from the VM's own counter of bytes read from the drive (`/sys/block/vda/stat`) against the "Total to scrub" figure, and the history (started, finished, cancelled, checksum errors) from the VM's kernel log, so a restarted app picks up a running scrub where it is. The percentage is an estimate (hence the "≈"): the counter also includes any other reads since the VM started.
 - **LUKS header backup:** reads the first 32 MiB of the partition with `sudo dd`, finds the real header size in the LUKS metadata (LUKS1 and LUKS2) and saves just that, mode 0600. It is the same content `cryptsetup luksHeaderBackup` writes, so `cryptsetup luksHeaderRestore` accepts it.
+- **Spin state:** `sudo sh -c` runs three `dd` reads of random, far-apart 4 KiB blocks on `/dev/rdiskXsY`, past the LUKS header, and the app reads the transfer time each `dd` prints. Timing `dd`'s own figure leaves the cost of starting `sudo` out of the measurement, and one `sudo` for all three reads means one password prompt. The raw device is unbuffered and the offsets are far apart, so neither macOS nor the drive's own cache can answer instead of the platters. Nothing is written, and `macOS disk sleep` is `pmset -g`'s `disksleep`, read at most once a minute.
 - **Snapshots** go to `.snapshots/<time>/` (`_root` for the top level, one entry per subvolume) or `.snapshots/<time>-<name>/` for a single subvolume. A snapshot of the top level alone would hold only empty folders where subvolumes are, so the whole-volume snapshot covers each subvolume too.
 - **Quit** unmounts and stops the VM. Killing the app (`pkill btrfs4mac`) leaves the mount and VM running on purpose, so the app can restart without unmounting.
 - Automatic actions are logged to `~/Library/Logs/btrfs4mac.log`; anylinuxfs keeps its own logs in `~/Library/Logs/anylinuxfs-*.log`.

@@ -43,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "lastScrubStamp") }
     }
     private var openMenu: NSMenu?
+    /// Minutes before macOS spins idle disks down (0 = never), from `pmset -g`.
+    private var diskSleep: Int?
+    private var spinChecking = false
 
     private var driveName: String { drive?.name ?? Config.pinnedDiskName ?? "Drive" }
 
@@ -81,8 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let pinned = Config.pinnedDiskName { found = all.first { $0.name == pinned } } else { found = all.first }
             let space = mounted ? spaceNumbers() : nil
             let hardware = found.flatMap { driveHardware(disk: $0.disk) }
+            let sleepMinutes = cachedDiskSleepMinutes()
             DispatchQueue.main.async {
                 self.driveChoices = all
+                self.diskSleep = sleepMinutes
                 if let hardware { self.hardware = hardware }
                 if case .busy = self.state { return }
                 if mounted {
@@ -255,6 +260,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
     }
 
+    /// Drive power: what macOS will do to an idle disk on its own, and a way to tell whether
+    /// the drive is spinning right now.
+    private func addPowerItems(to menu: NSMenu) {
+        let sleep = describeDiskSleep(diskSleep)
+        add(to: menu, sleep.text, icon: "powersleep", tip: sleep.tip)
+        add(to: menu, spinChecking ? "Checking spin state…" : "Check Spin State…", icon: "stopwatch",
+            spinChecking ? nil : #selector(checkSpinState),
+            tip: "Times reads of random sectors on the raw disk: milliseconds means the drive is spinning, seconds mean it was parked and this check woke it. Needs your Mac password.")
+    }
+
     private func addHeaderMenu(to menu: NSMenu) {
         let sub = addSubmenu(to: menu, "LUKS Header", icon: "key.horizontal.fill")
         add(to: sub, "Back Up…", icon: "square.and.arrow.down", #selector(backupHeader))
@@ -311,6 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add(to: menu, "Unlock and Mount…", icon: "lock.open.fill", #selector(unlock))
             addHeaderMenu(to: menu)
             add(to: menu, "Eject Drive", icon: "eject.fill", #selector(ejectOnly))
+            menu.addItem(.separator())
+            addPowerItems(to: menu)
         case .busy(let what):
             add(to: menu, what, icon: "hourglass")
         case .mounted:
@@ -333,6 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let status = keepAliveStatus()
             add(to: menu, status.text, icon: status.ok ? "checkmark.circle" : "exclamationmark.triangle",
                 tip: status.tip)
+            addPowerItems(to: menu)
             addHeaderMenu(to: menu)
         }
         menu.addItem(.separator())
@@ -435,6 +453,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openFinder() {
         NSWorkspace.shared.open(URL(fileURLWithPath: Config.mountPoint))
+    }
+
+    @objc private func checkSpinState() {
+        guard !spinChecking, let drive else { return }
+        spinChecking = true
+        let partition = drive.partition, size = drive.size
+        DispatchQueue.global().async { [weak self] in
+            let result = measureReadLatency(partition: partition, size: size)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.spinChecking = false
+                switch result {
+                case .success(let times):
+                    log("spin state \(partition): " + times.map { String(format: "%.3f s", $0) }.joined(separator: ", "))
+                    self.show("Spin state of \(self.driveName)", describeSpinState(times))
+                case .failure(let error):
+                    log("spin state \(partition): failed")
+                    self.show("Could not check the spin state", "\(error)")
+                }
+            }
+        }
     }
 
     @objc private func toggleKeepAlive() {

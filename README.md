@@ -33,12 +33,18 @@ It works with **any external drive**, whatever the make: the drive is found auto
 
 - Apple Silicon Mac, macOS 13 or newer
 - Xcode Command Line Tools (`xcode-select --install`), for `swift`
-- anylinuxfs:
+- anylinuxfs **0.20.1, pinned**:
   ```bash
   brew tap nohajc/anylinuxfs
   brew trust nohajc/anylinuxfs
+  git -C "$(brew --repo nohajc/anylinuxfs)" checkout a8a1f5f -- Formula/anylinuxfs.rb
   brew install anylinuxfs
+  brew pin anylinuxfs
+  git -C "$(brew --repo nohajc/anylinuxfs)" checkout HEAD -- Formula/anylinuxfs.rb
   ```
+  anylinuxfs 0.21.1 breaks read-write mounts of a Btrfs-on-LUKS drive (the
+  volume drops off within a minute or two of use); 0.20.1 works. `brew pin`
+  keeps Homebrew from upgrading it.
 - An admin account: reading the raw disk needs `sudo`, which the app requests through a native password dialog.
 
 ## Install

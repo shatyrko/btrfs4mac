@@ -23,7 +23,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var promptedFor: String?
     private var backingUp = false
     private var missingStrikes = 0
-    private var latestRelease: Release?
     private var btrfsInfo: BtrfsInfo?
     private weak var btrfsCard: BtrfsView?
     private var btrfsTimer: Timer?
@@ -31,6 +30,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sizesPaths: [String] = []
     private var sizesFetchedAt: Date?
     private var sizesBusy = false
+    /// Set by the "Recalculate the sizes" button, so a count asked for by hand is not held back.
+    private var sizesRequested = false
+    /// When the current mount was first seen. Right after an unlock the VM is busy (free space tree,
+    /// Finder), and a long `btrfs filesystem du` on top of that made the NFS server stop answering.
+    private var mountedSince: Date?
+    /// True while `fetchBtrfsInfo` runs, so the 4-second timer never stacks a second `vm exec` on a slow VM.
+    private var btrfsLoading = false
     private let scrubRun = ScrubRun()
     private var scrubTotal: Double?
     private var scrubTotalFetching = false
@@ -61,9 +67,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         migrateFromGDrive()
         Askpass.install()
         log("started \(Versions.app) (\(Versions.build))")
-        checkForUpdates()
-        let daily = Timer(timeInterval: 12 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates() }
-        RunLoop.main.add(daily, forMode: .common)
         updateIcon()
         refresh()
         let poll = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
@@ -111,9 +114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if let space { self.space = space }
                     self.drive = found
                     self.state = .mounted
+                    if self.mountedSince == nil { self.mountedSince = Date() }
                     if self.keepAliveEnabled { self.keepAlive.start() }
                 } else {
                     self.keepAlive.stop()
+                    self.mountedSince = nil
                     self.sampler.reset()
                     self.activity = .idle
                     self.readHistory = []
@@ -291,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             openSnapshot: { name in later { [weak self] in self?.openSnapshot(name) } },
             deleteSnapshot: { name in later { [weak self] in self?.confirmDeleteSnapshot(name) } },
             toggleScrub: { later { [weak self] in self?.toggleScrub() } },
-            refreshSizes: { [weak self] in self?.sizesFetchedAt = nil; self?.reloadBtrfs() }
+            refreshSizes: { [weak self] in self?.sizesFetchedAt = nil; self?.sizesRequested = true; self?.reloadBtrfs() }
         )
         card.update(btrfsInfo)
         btrfsCard = card
@@ -361,14 +366,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if case .notConnected = state {} else { quitTitle = "Eject Drive and Quit" }
         add(to: menu, quitTitle, icon: "eject.circle", #selector(quit),
             tip: "Unmounts the volume, stops the Linux VM, ejects the drive and quits the app")
-        if let update = updateAvailable {
-            let item = NSMenuItem(title: "Update available: anylinuxfs \(update.version)",
-                                  action: #selector(openReleasePage), keyEquivalent: "")
-            item.target = self
-            item.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
-            menu.insertItem(item, at: 0)
-            menu.insertItem(.separator(), at: 1)
-        }
     }
 
     private func keepAliveStatus() -> (text: String, ok: Bool, tip: String?) {
@@ -541,9 +538,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func reloadBtrfs() {
+        guard !btrfsLoading else { return }
+        btrfsLoading = true
         DispatchQueue.global().async {
             let info = fetchBtrfsInfo()
             DispatchQueue.main.async {
+                self.btrfsLoading = false
                 guard var info else { return }
                 self.applyScrub(to: &info)
                 self.refreshSizesIfNeeded(info.subvolumes)
@@ -616,12 +616,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Subvolume sizes are slow to count on a big tree, so they are cached and recounted every ten minutes,
-    /// when the list of subvolumes changes, or on request.
+    /// Subvolume sizes are slow to count on a big tree (about four minutes on the 22 TB drive), so they are
+    /// cached and recounted every ten minutes, when the list of subvolumes changes, or on request. The first
+    /// automatic count waits until the drive has been mounted for a minute.
     private func refreshSizesIfNeeded(_ paths: [String]) {
         guard !paths.isEmpty, !sizesBusy else { return }
         let stale = sizesFetchedAt.map { Date().timeIntervalSince($0) > 600 } ?? true
         guard stale || Set(paths) != Set(sizesPaths) else { return }
+        let settled = mountedSince.map { Date().timeIntervalSince($0) >= 60 } ?? false
+        guard settled || sizesRequested else { return }
+        sizesRequested = false
         sizesBusy = true
         DispatchQueue.global().async {
             let sizes = fetchSubvolumeSizes(paths)
@@ -777,44 +781,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return .terminateLater
     }
 
-    // MARK: Updates and About
-
-    private func checkForUpdates(then: (() -> Void)? = nil) {
-        fetchLatestRelease { [self] release in
-            if let release { latestRelease = release }
-            then?()
-        }
-    }
-
-    private var updateAvailable: Release? {
-        guard let latest = latestRelease, let installed = Versions.anylinuxfs(),
-              isNewer(latest.version, than: installed) else { return nil }
-        return latest
-    }
-
-    @objc private func openReleasePage() {
-        if let url = updateAvailable.flatMap({ URL(string: $0.url) }) { NSWorkspace.shared.open(url) }
-    }
+    // MARK: About
 
     @objc private func about() {
-        checkForUpdates { [self] in
-            let installed = Versions.anylinuxfs() ?? "not found"
-            var vm = "anylinuxfs \(installed)"
-            if let latest = latestRelease {
-                vm += isNewer(latest.version, than: installed)
-                    ? ", update available: \(latest.version)\nUpgrade with: brew update && brew upgrade anylinuxfs"
-                    : ", up to date"
-            } else {
-                vm += ", could not check for updates"
-            }
-            NSApp.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.messageText = "btrfs4mac \(Versions.app)"
-            alert.informativeText = "Build \(Versions.build)\n\nLinux VM (microVM): \(vm)"
-            alert.addButton(withTitle: "OK")
-            if updateAvailable != nil { alert.addButton(withTitle: "Release Page") }
-            if alert.runModal() == .alertSecondButtonReturn { openReleasePage() }
-        }
+        let installed = Versions.anylinuxfs() ?? "not found"
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "btrfs4mac \(Versions.app)"
+        alert.informativeText = "Build \(Versions.build)\n\nLinux VM (microVM): anylinuxfs \(installed)\n"
+            + "anylinuxfs is pinned at 0.20.1 in Homebrew on purpose: 0.21.1 broke read-write mounts."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     // MARK: Dialogs

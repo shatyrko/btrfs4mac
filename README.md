@@ -118,7 +118,7 @@ Flow: plug the drive in, start the app. It asks for the passphrase at once, moun
 - A header backup plus an old passphrase unlocks the drive. Keep the file private, and off the drive itself (the app refuses to save it there).
 - "Remember in Keychain" stores the passphrase in your login keychain (item `btrfs4mac.luks`). Anyone logged in as you with the keychain unlocked can then open the drive. It is off unless you tick it; "Forget Saved Passphrase" removes it.
 - The Mac password is only ever typed into the system dialog that `sudo` shows; the app does not see or store it.
-- The app's own network access is a single update check; everything else is local. See "Network access" below.
+- The app itself makes no network connections; only anylinuxfs downloads its VM image. See "Network access" below.
 
 ## Network access
 
@@ -126,7 +126,6 @@ If you run a firewall (Little Snitch, LuLu, …) it will ask about these. What e
 
 | Connection | Made by | Why | Can you block it? |
 | --- | --- | --- | --- |
-| `api.github.com`, HTTPS | btrfs4mac | Update check: one request for the latest anylinuxfs release, at start and every 12 hours. Sends nothing but a generic `User-Agent: btrfs4mac`. | **Yes.** Everything works without it; you only lose the "Update available" notice. |
 | Virtual network `172.27.1.0/30` | anylinuxfs (`vmnet-helper`, or `gvproxy`) | A private network between your Mac and the Linux VM that reads the drive. | No: it is how the volume reaches Finder. It never leaves the Mac. |
 | NFS to `172.27.1.2`, ports 111, 2049, 32765, 32767 (TCP and UDP) | macOS NFS client → the VM | The volume is served by the VM as an NFS share and mounted at `/Volumes/<label>` (anylinuxfs' own documentation: by default it is reachable only from localhost). | No, same reason. Local only. |
 | `dl-cdn.alpinelinux.org` and the registry holding the VM image, HTTPS | anylinuxfs | Downloads the Alpine Linux image and its packages (Btrfs tools, cryptsetup, the NFS server) the first time it runs, and again when you update it. | Only needed for the first setup and for upgrades. |

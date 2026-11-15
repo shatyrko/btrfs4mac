@@ -2,7 +2,7 @@ btrfs4mac is a macOS menu bar app for external drives that are **Btrfs on LUKS2*
 
 ## Install
 
-1. Install anylinuxfs: `brew tap nohajc/anylinuxfs && brew trust nohajc/anylinuxfs && brew install anylinuxfs`
+1. Install anylinuxfs **0.20.1 and pin it** (0.21.1 breaks read-write mounts). The commands are under Requirements in the [README](https://github.com/shatyrko/btrfs4mac#requirements).
 2. Open the DMG and drag **btrfs4mac** onto **Applications**.
 3. **macOS blocks the first launch**, because the app is not notarized (that needs a paid Apple Developer account). Open it once, then go to **System Settings ▸ Privacy & Security ▸ Security** and click **Open Anyway**. Or in a terminal: `xattr -dr com.apple.quarantine /Applications/btrfs4mac.app`
 

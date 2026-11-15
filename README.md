@@ -19,7 +19,7 @@ It works with **any external drive**, whatever the make: the drive is found auto
 - **Btrfs card** in the main menu: every subvolume with its size (open, create, snapshot one) and snapshots (open, delete, snapshot everything) as rows with buttons, plus a scrub (full checksum check of all data) with an estimated progress bar and the result of the last run.
 - **LUKS header backup and verify.** Saves the LUKS header to a file you choose and compares a saved file with the drive later.
 - **Recovers from a dropped drive.** If the drive comes back under a new disk name, the dead mount is cleared and the app asks again.
-- **About** shows the app and anylinuxfs versions and tells you when a newer anylinuxfs release exists.
+- **About** shows the app and anylinuxfs versions.
 
 <p>
   <img src="docs/dashboard-dark.png" width="330" alt="Dashboard, dark">
@@ -51,7 +51,7 @@ It works with **any external drive**, whatever the make: the drive is found auto
 
 ### Option 1: the DMG
 
-1. Install [anylinuxfs](https://github.com/nohajc/anylinuxfs) (see Requirements).
+1. Install [anylinuxfs](https://github.com/nohajc/anylinuxfs) 0.20.1, pinned (see Requirements).
 2. Download `btrfs4mac-<version>.dmg` from the [Releases page](https://github.com/shatyrko/btrfs4mac/releases), open it and drag **btrfs4mac** onto **Applications**.
 3. **The first launch is blocked by macOS.** The app is signed ad hoc and not notarized (notarizing needs a paid Apple Developer account), so Gatekeeper refuses a downloaded copy with a message like "btrfs4mac can't be opened because Apple cannot check it for malicious software". It is a one-time step:
    1. Open btrfs4mac once (double-click) and close the message.

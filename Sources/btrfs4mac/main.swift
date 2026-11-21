@@ -394,8 +394,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state = .busy("Unlocking…")
         updateIcon()
         // Reading the raw disk needs root; sudo drops back to this user once the VM is up.
-        run("/usr/bin/sudo", ["-A", "--preserve-env=ALFS_PASSPHRASE", Config.anylinuxfs,
-                              "mount", "-w", "false", "--ignore-permissions", "/dev/\(partition)"],
+        // The same root shell first clears leftover mount folders, so the volume keeps its plain name.
+        run("/usr/bin/sudo", ["-A", "--preserve-env=ALFS_PASSPHRASE", "/bin/sh", "-c",
+                              staleMountCleanup + "\nshift\nexec \"$@\"", "sh", volumeName ?? "",
+                              Config.anylinuxfs, "mount", "-w", "false", "--ignore-permissions", "/dev/\(partition)"],
             env: ["ALFS_PASSPHRASE": passphrase ?? "", "SUDO_ASKPASS": Askpass.path]) { [self] result in
             state = .notConnected
             log("unlock \(partition): exit \(result.status)")

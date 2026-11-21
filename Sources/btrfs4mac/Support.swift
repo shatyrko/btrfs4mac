@@ -142,10 +142,35 @@ func scanMount() -> ActiveMount? {
     mountLock.lock()
     lastMount = found
     mountLock.unlock()
+    if let found {
+        let name = (found.vmPath as NSString).lastPathComponent
+        if !name.isEmpty && name != volumeName { UserDefaults.standard.set(name, forKey: "volumeName") }
+    }
     return found
 }
 
 func isMounted() -> Bool { scanMount() != nil }
+
+/// The volume's label as seen at the last mount: the folder name inside the VM, without the "-1", "-2"
+/// macOS adds to the folder under /Volumes.
+var volumeName: String? { UserDefaults.standard.string(forKey: "volumeName") }
+
+/// Shell that removes leftover mount folders: /Volumes/<name> and /Volumes/<name>-N that are not mounted
+/// and hold nothing but Finder's .DS_Store. Finder writes that file into the bare folder when the volume
+/// goes away while a window is open on it; the folder is then not empty and stays, so the next mount
+/// lands on <name>-1, then <name>-2 and so on. Needs root (/Volumes belongs to root); the name is $1.
+let staleMountCleanup = #"""
+n="$1"
+if [ -n "$n" ]; then
+  for d in "/Volumes/$n" "/Volumes/$n"-*; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    case "${d#"/Volumes/$n"}" in "") ;; -|-*[!0-9]*) continue ;; -*) ;; *) continue ;; esac
+    /sbin/mount | /usr/bin/grep -qF " on $d (" && continue
+    [ -z "$(/bin/ls -A "$d" | /usr/bin/grep -vx '.DS_Store')" ] || continue
+    /bin/rm -f "$d/.DS_Store" && /bin/rmdir "$d" && echo "removed leftover $d"
+  done
+fi
+"""#
 
 /// Partition the mounted volume was served from, e.g. "disk4s1".
 func mountedDevice() -> String? { scanMount()?.device }

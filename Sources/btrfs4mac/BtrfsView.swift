@@ -33,7 +33,7 @@ final class BtrfsView: NSView {
         var openSnapshot: (String) -> Void = { _ in }
         var deleteSnapshot: (String) -> Void = { _ in }
         var toggleScrub: () -> Void = {}
-        var refreshSizes: () -> Void = {}
+        var countSize: (String) -> Void = { _ in }
     }
 
     static let width: CGFloat = 330
@@ -71,9 +71,10 @@ final class BtrfsView: NSView {
 
     func update(_ info: BtrfsInfo?) {
         self.info = info
-        let sizes = (info?.sizes ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\(Int($0.value))" }
+        let sizes = (info?.sizes ?? [:]).sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(Int($0.value.bytes))@\(Int($0.value.countedAt.timeIntervalSince1970 / 60))" }
         let sig = ((info?.subvolumes ?? []) + ["|"] + (info?.snapshots ?? []) + ["|"] + sizes).joined(separator: "\n")
-            + "\(info == nil)\(info?.sizesBusy ?? false)"
+            + "\(info == nil)\(info?.sizeCounting ?? "")"
         if sig != signature {
             signature = sig
             rebuild()
@@ -103,15 +104,26 @@ final class BtrfsView: NSView {
 
         // Subvolumes
         add(sectionHeader("SUBVOLUMES", buttons: [
-            button("arrow.clockwise", "Recalculate the sizes") { [weak self] in self?.actions.refreshSizes() },
             button("plus.circle.fill", "New subvolume") { [weak self] in self?.actions.newSubvolume() }
         ]))
         if info.subvolumes.isEmpty {
             add(label("None yet. Create one with +", size: 12, color: .secondaryLabelColor))
         }
         for path in info.subvolumes {
-            let size = info.sizes[path].map { formatBytes($0) } ?? (info.sizesBusy ? "calculating…" : "size unknown")
+            let size: String
+            if info.sizeCounting == path {
+                size = "counting the size…"
+            } else if let known = info.sizes[path] {
+                size = formatBytes(known.bytes) + ", counted " + relativeTime(known.countedAt)
+            } else {
+                size = "size not counted"
+            }
+            let count = button("arrow.clockwise", info.sizeCounting == nil
+                               ? "Count the size of \(path) (reads the whole subvolume; minutes on a big one)"
+                               : "Wait: another size count is running") { [weak self] in self?.actions.countSize(path) }
+            count.isEnabled = info.sizeCounting == nil
             add(row(icon: "folder.fill", tint: NSColor.systemBlue, title: path, subtitle: size, buttons: [
+                count,
                 button("folder", "Open in Finder") { [weak self] in self?.actions.openSubvolume(path) },
                 button("camera.fill", "Take a snapshot of \(path)") { [weak self] in self?.actions.snapshotSubvolume(path) }
             ]))
@@ -234,8 +246,12 @@ final class BtrfsView: NSView {
         guard name.count >= 17, let date = formatter.date(from: String(name.prefix(17))) else { return (name, "") }
         var title = String(name.dropFirst(17))
         if title.hasPrefix("-") { title.removeFirst() }
+        return (title.isEmpty ? "Everything" : title, relativeTime(date))
+    }
+
+    private func relativeTime(_ date: Date) -> String {
         let relative = RelativeDateTimeFormatter()
         relative.unitsStyle = .short
-        return (title.isEmpty ? "Everything" : title, relative.localizedString(for: date, relativeTo: Date()))
+        return relative.localizedString(for: date, relativeTo: Date())
     }
 }

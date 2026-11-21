@@ -26,15 +26,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var btrfsInfo: BtrfsInfo?
     private weak var btrfsCard: BtrfsView?
     private var btrfsTimer: Timer?
-    private var subvolumeSizes: [String: Double] = [:]
-    private var sizesPaths: [String] = []
-    private var sizesFetchedAt: Date?
-    private var sizesBusy = false
-    /// Set by the "Recalculate the sizes" button, so a count asked for by hand is not held back.
-    private var sizesRequested = false
-    /// When the current mount was first seen. Right after an unlock the VM is busy (free space tree,
-    /// Finder), and a long `btrfs filesystem du` on top of that made the NFS server stop answering.
-    private var mountedSince: Date?
+    /// The subvolume whose size is being counted. Sizes are counted only when the user presses the button on
+    /// a subvolume, one at a time: `btrfs filesystem du` reads every file's metadata (about four minutes on
+    /// the 22 TB drive), and running it on its own made the NFS share drop and blocked unmounting.
+    private var sizeCounting: String?
+    /// Counted sizes, kept across restarts: path → [bytes, seconds since 1970 when counted].
+    private var savedSizes: [String: [Double]] {
+        get { UserDefaults.standard.dictionary(forKey: "subvolumeSizes") as? [String: [Double]] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "subvolumeSizes") }
+    }
     /// True while `fetchBtrfsInfo` runs, so the 4-second timer never stacks a second `vm exec` on a slow VM.
     private var btrfsLoading = false
     private let scrubRun = ScrubRun()
@@ -114,11 +114,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if let space { self.space = space }
                     self.drive = found
                     self.state = .mounted
-                    if self.mountedSince == nil { self.mountedSince = Date() }
                     if self.keepAliveEnabled { self.keepAlive.start() }
                 } else {
                     self.keepAlive.stop()
-                    self.mountedSince = nil
                     self.sampler.reset()
                     self.activity = .idle
                     self.readHistory = []
@@ -296,7 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             openSnapshot: { name in later { [weak self] in self?.openSnapshot(name) } },
             deleteSnapshot: { name in later { [weak self] in self?.confirmDeleteSnapshot(name) } },
             toggleScrub: { later { [weak self] in self?.toggleScrub() } },
-            refreshSizes: { [weak self] in self?.sizesFetchedAt = nil; self?.sizesRequested = true; self?.reloadBtrfs() }
+            countSize: { [weak self] path in self?.countSize(path) }
         )
         card.update(btrfsInfo)
         btrfsCard = card
@@ -420,32 +418,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func unmount(eject doEject: Bool) {
+        guard let stopScrub = confirmStopScrub() else { return }
         let disk = drive?.disk
         keepAlive.stop()
         state = .busy("Unmounting…")
         activity = .idle
         updateIcon()
         log("lock\(doEject ? " and eject" : "") requested")
-        run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"]) { [self] result in
-            state = .notConnected
-            if result.status != 0 {
-                show("Could not unmount", String(result.output.suffix(1200)))
-            } else if doEject, let disk {
-                eject(disk)
-                return
+        DispatchQueue.global().async { [self] in
+            releaseVolume(scrub: stopScrub)
+            let result = runSync(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"])
+            DispatchQueue.main.async { [self] in
+                state = .notConnected
+                if result.status != 0 {
+                    log("lock: unmount failed: \(result.output.suffix(200))")
+                    show("Could not unmount", String(result.output.suffix(1200)))
+                } else if doEject, let disk {
+                    eject(disk)
+                    return
+                }
+                refresh()
             }
-            refresh()
         }
     }
 
     private func eject(_ disk: String) {
         state = .busy("Ejecting…")
         updateIcon()
-        run("/usr/sbin/diskutil", ["eject", "/dev/\(disk)"]) { [self] result in
-            state = .notConnected
-            if result.status != 0 { show("Could not eject", result.output) }
-            refresh()
+        DispatchQueue.global().async { [self] in
+            let result = ejectWhenFree(disk)
+            DispatchQueue.main.async { [self] in
+                log("eject \(disk): exit \(result.status)")
+                state = .notConnected
+                if result.status != 0 { show("Could not eject", result.output) }
+                refresh()
+            }
         }
+    }
+
+    /// A running data check keeps the volume busy, so unmounting has to cancel it. Returns nil when the user
+    /// would rather keep it running, otherwise whether to cancel it.
+    private func confirmStopScrub() -> Bool? {
+        guard btrfsInfo?.scrubRunning == true || scrubRun.isRunning else { return false }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "A data check is running"
+        alert.informativeText = "Unmounting cancels it. Nothing is lost; you can start it again later."
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: "Cancel Check and Unmount")
+        return alert.runModal() == .alertFirstButtonReturn ? nil : true
     }
 
     @objc private func openFinder() {
@@ -546,9 +567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.btrfsLoading = false
                 guard var info else { return }
                 self.applyScrub(to: &info)
-                self.refreshSizesIfNeeded(info.subvolumes)
-                info.sizes = self.subvolumeSizes
-                info.sizesBusy = self.sizesBusy
+                self.applySizes(to: &info)
                 self.btrfsInfo = info
                 self.btrfsCard?.update(info)
                 self.dashboard?.data = self.dashboardData()
@@ -616,25 +635,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Subvolume sizes are slow to count on a big tree (about four minutes on the 22 TB drive), so they are
-    /// cached and recounted every ten minutes, when the list of subvolumes changes, or on request. The first
-    /// automatic count waits until the drive has been mounted for a minute.
-    private func refreshSizesIfNeeded(_ paths: [String]) {
-        guard !paths.isEmpty, !sizesBusy else { return }
-        let stale = sizesFetchedAt.map { Date().timeIntervalSince($0) > 600 } ?? true
-        guard stale || Set(paths) != Set(sizesPaths) else { return }
-        let settled = mountedSince.map { Date().timeIntervalSince($0) >= 60 } ?? false
-        guard settled || sizesRequested else { return }
-        sizesRequested = false
-        sizesBusy = true
+    private func applySizes(to info: inout BtrfsInfo) {
+        for (path, value) in savedSizes where value.count == 2 {
+            info.sizes[path] = (value[0], Date(timeIntervalSince1970: value[1]))
+        }
+        info.sizeCounting = sizeCounting
+    }
+
+    /// Shows the size state on the card at once, without waiting for the next VM round trip.
+    private func redrawSizes() {
+        guard var info = btrfsInfo else { return }
+        info.sizes = [:]
+        applySizes(to: &info)
+        btrfsInfo = info
+        btrfsCard?.update(info)
+    }
+
+    /// Counts one subvolume's size, only when asked to (see `sizeCounting`).
+    private func countSize(_ path: String) {
+        guard sizeCounting == nil, case .mounted = state else { return }
+        sizeCounting = path
+        log("size count \(path): started")
+        redrawSizes()
         DispatchQueue.global().async {
-            let sizes = fetchSubvolumeSizes(paths)
+            let sizes = fetchSubvolumeSizes([path])
             DispatchQueue.main.async {
-                self.subvolumeSizes = sizes
-                self.sizesPaths = paths
-                self.sizesFetchedAt = Date()
-                self.sizesBusy = false
-                self.reloadBtrfs()
+                self.sizeCounting = nil
+                if let bytes = sizes[path] {
+                    self.savedSizes[path] = [bytes, Date().timeIntervalSince1970]
+                    log("size count \(path): \(formatBytes(bytes))")
+                } else {
+                    log("size count \(path): no result")
+                }
+                self.redrawSizes()
             }
         }
     }
@@ -744,6 +777,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.addButton(withTitle: "Unmount and Quit")
             if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }
         }
+        var stopScrub = false
+        if needsUnmount {
+            guard let answer = confirmStopScrub() else { return .terminateCancel }
+            stopScrub = answer
+        }
 
         log("quit: unmount=\(needsUnmount) eject=\(disk ?? "none")")
         keepAlive.stop()
@@ -752,33 +790,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let finish = { [self] in
             guard let disk else { NSApp.reply(toApplicationShouldTerminate: true); return }
-            run("/usr/sbin/diskutil", ["eject", "/dev/\(disk)"]) { [self] result in
-                log("eject \(disk): exit \(result.status)")
-                if result.status != 0 { show("Could not eject the drive", result.output) }
-                NSApp.reply(toApplicationShouldTerminate: true)
+            DispatchQueue.global().async { [self] in
+                let result = ejectWhenFree(disk)
+                DispatchQueue.main.async { [self] in
+                    log("eject \(disk): exit \(result.status)")
+                    if result.status != 0 { show("Could not eject the drive", result.output) }
+                    NSApp.reply(toApplicationShouldTerminate: true)
+                }
             }
         }
         if !needsUnmount { finish(); return .terminateLater }
 
-        run(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"]) { [self] result in
-            if !isMounted() && !vmProcessesRunning() { finish(); return }
-            // Still mounted (files open?) or the VM did not exit: ask before forcing it.
-            log("quit: unmount did not finish cleanly: \(result.output.suffix(200))")
-            NSApp.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.messageText = "The drive did not unmount cleanly"
-            alert.informativeText = String(result.output.suffix(600)) + "\n\nForce Stop kills the VM; data not yet written is lost."
-            alert.addButton(withTitle: "Stay Open")
-            alert.addButton(withTitle: "Force Stop and Quit")
-            if alert.runModal() == .alertFirstButtonReturn {
-                state = .notConnected
-                refresh()
-                NSApp.reply(toApplicationShouldTerminate: false)
-                return
-            }
-            run(Config.anylinuxfs, ["stop"]) { _ in finish() }
+        let mounted = isMounted()
+        DispatchQueue.global().async { [self] in
+            if mounted { releaseVolume(scrub: stopScrub) }
+            let result = runSync(Config.anylinuxfs, ["unmount", "--wait-for-vm", "30"])
+            for _ in 0..<10 where vmProcessesRunning() { sleep(1) }
+            let holders = isMounted() ? appsUsing(Config.mountPoint) : []
+            DispatchQueue.main.async { [self] in unmountFinished(result, holders: holders, finish: finish) }
         }
         return .terminateLater
+    }
+
+    /// After the quit-time unmount: eject, or ask before forcing the VM down if the volume is still held.
+    private func unmountFinished(_ result: CommandResult, holders: [String], finish: @escaping () -> Void) {
+        if !isMounted() && !vmProcessesRunning() { finish(); return }
+        // Still mounted (files open on the Mac?) or the VM did not exit: ask before forcing it.
+        log("quit: unmount did not finish cleanly: \(result.output.suffix(200))")
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "The drive did not unmount cleanly"
+        var text = String(result.output.suffix(600))
+        if !holders.isEmpty { text += "\n\nStill using the volume: " + holders.joined(separator: ", ") }
+        alert.informativeText = text + "\n\nForce Stop kills the VM; data not yet written is lost."
+        alert.addButton(withTitle: "Stay Open")
+        alert.addButton(withTitle: "Force Stop and Quit")
+        if alert.runModal() == .alertFirstButtonReturn {
+            state = .notConnected
+            refresh()
+            NSApp.reply(toApplicationShouldTerminate: false)
+            return
+        }
+        log("quit: force stop")
+        run(Config.anylinuxfs, ["stop"]) { _ in finish() }
     }
 
     // MARK: About

@@ -21,9 +21,11 @@ struct BtrfsInfo {
     var scrubPercent: Double?
     var snapshots: [String] = []
     var subvolumes: [String] = []
-    /// Bytes per subvolume, from `btrfs filesystem du`; filled in by the app, which caches it.
-    var sizes: [String: Double] = [:]
-    var sizesBusy = false
+    /// Bytes per subvolume from `btrfs filesystem du`, with when it was counted; filled in by the app, which
+    /// counts a subvolume only when asked to and remembers the result.
+    var sizes: [String: (bytes: Double, countedAt: Date)] = [:]
+    /// The subvolume being counted right now, if any.
+    var sizeCounting: String?
     /// Bytes the VM has read from the drive since it booted (scrub progress is measured with it).
     var vmReadBytes: Double?
     var vmUptime: Double?
@@ -259,6 +261,27 @@ final class ScrubRun {
 }
 
 func cancelScrub() -> CommandResult { vmExec([btrfs, "scrub", "cancel", vmMountPoint]) }
+
+/// Ends the work this app runs on the volume inside the VM: a size count, and a data check if `scrub` is true.
+/// Either keeps the volume busy, and the VM then cannot unmount it ("Resource busy") and never lets go of the drive.
+func releaseVolume(scrub: Bool) {
+    var script = "/usr/bin/pkill -f '[b]trfs filesystem du'"
+    if scrub { script += "; \(btrfs) scrub cancel \(vmMountPoint)" }
+    _ = vmExec(["/bin/sh", "-c", script + " >/dev/null 2>&1; true"])
+}
+
+/// Ejects once the VM has let go of the drive: waits up to 20 s for the anylinuxfs processes to exit, then tries
+/// `diskutil eject` up to three times, 3 s apart, since the disk can stay claimed for a moment after the VM exits.
+func ejectWhenFree(_ disk: String) -> CommandResult {
+    for _ in 0..<20 where vmProcessesRunning() { sleep(1) }
+    var result = CommandResult(status: 1, output: "")
+    for attempt in 1...3 {
+        result = runSync("/usr/sbin/diskutil", ["eject", "/dev/\(disk)"])
+        if result.status == 0 { break }
+        if attempt < 3 { sleep(3) }
+    }
+    return result
+}
 
 func formatBytes(_ bytes: Double) -> String {
     let units = ["B", "KB", "MB", "GB", "TB", "PB"]

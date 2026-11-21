@@ -196,6 +196,19 @@ func findDrive() -> DriveInfo? {
 }
 
 /// Processes anylinuxfs leaves behind while its VM is up.
+/// Names of the Mac programs with a file open under `path` (e.g. Finder, a copy, VeraCrypt), from `lsof`.
+/// Plain `lsof` filtered here: `lsof +D` walks the whole volume and takes forever on a big drive.
+func appsUsing(_ path: String) -> [String] {
+    let result = runSync("/usr/sbin/lsof", ["-n", "-w", "-F", "cn"])
+    var names: [String] = []
+    var command = ""
+    for line in result.output.split(separator: "\n") {
+        if line.hasPrefix("c") { command = String(line.dropFirst()) }
+        if line.hasPrefix("n"), line.dropFirst().hasPrefix(path), !names.contains(command) { names.append(command) }
+    }
+    return names
+}
+
 func vmProcessesRunning() -> Bool {
     ["anylinuxfs", "vmnet-helper", "gvproxy"].contains { runSync("/usr/bin/pgrep", ["-x", $0]).status == 0 }
 }

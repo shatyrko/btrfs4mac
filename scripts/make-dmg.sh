@@ -1,9 +1,9 @@
 #!/bin/bash
 # Builds build/btrfs4mac-<version>.dmg (the app and a shortcut to /Applications, to drag it across)
-# and its SHA-256 file. Usage: VERSION=0.4.2 scripts/make-dmg.sh
+# and its SHA-256 file. Usage: VERSION=0.4.3 scripts/make-dmg.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export VERSION="${VERSION:-0.4.2}"
+export VERSION="${VERSION:-0.4.3}"
 
 scripts/build.sh --no-install
 

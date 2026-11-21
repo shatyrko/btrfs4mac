@@ -209,6 +209,27 @@ func appsUsing(_ path: String) -> [String] {
     return names
 }
 
+/// Why `anylinuxfs mount` failed, from its output, so the user sees a plain sentence instead of the VM log.
+enum UnlockFailure {
+    case wrongPassphrase
+    /// sudo got no Mac password: the dialog was cancelled or the password was wrong.
+    case macPassword
+    /// Anything else, with the error lines of the log (or its tail).
+    case other(String)
+
+    init(output: String) {
+        if output.contains("No key available with this passphrase") {
+            self = .wrongPassphrase
+        } else if output.contains("sudo:") && (output.contains("password") || output.contains("askpass")) {
+            self = .macPassword
+        } else {
+            let errors = output.split(separator: "\n").filter { $0.contains("Error") || $0.contains("error") }
+                .map { $0.replacingOccurrences(of: "Linux: ", with: "").replacingOccurrences(of: "macOS: ", with: "") }
+            self = .other(errors.isEmpty ? String(output.suffix(800)) : errors.suffix(6).joined(separator: "\n"))
+        }
+    }
+}
+
 func vmProcessesRunning() -> Bool {
     ["anylinuxfs", "vmnet-helper", "gvproxy"].contains { runSync("/usr/bin/pgrep", ["-x", $0]).status == 0 }
 }

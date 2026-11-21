@@ -382,8 +382,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Actions
 
     @objc private func unlock() {
-        guard case .locked(let partition, _) = state else { return }
-        var passphrase = Keychain.load()
+        guard case .locked(let partition, let disk) = state else { return }
+        let saved = Keychain.load()
+        var passphrase = saved
         var remember = false
         if passphrase == nil {
             guard let answer = askPassphrase() else { return }
@@ -401,12 +402,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if result.status == 0 && isMounted() {
                 if remember, let passphrase { Keychain.save(passphrase) }
                 openFinder()
-            } else {
-                Keychain.delete()
-                show("Could not mount", String(result.output.suffix(1200)))
+                refresh()
+                return
+            }
+            switch UnlockFailure(output: result.output) {
+            case .wrongPassphrase:
+                // Only a rejected passphrase clears the saved one; other failures say nothing about it.
+                if saved != nil { Keychain.delete() }
+                if askTryAgain("Wrong passphrase",
+                               saved != nil ? "The passphrase saved in the Keychain no longer opens the drive, so it was removed. Type it again."
+                                            : "The drive did not accept that passphrase. Check the keyboard layout and Caps Lock, and try again.") {
+                    state = .locked(partition: partition, disk: disk)
+                    unlock()
+                    return
+                }
+            case .macPassword:
+                if askTryAgain("Mac password not accepted",
+                               "Unlocking needs your Mac password to read the drive. It was cancelled or typed wrong.") {
+                    state = .locked(partition: partition, disk: disk)
+                    unlock()
+                    return
+                }
+            case .other(let detail):
+                show("Could not mount", detail)
             }
             refresh()
         }
+    }
+
+    /// Returns true when the user wants to try again.
+    private func askTryAgain(_ title: String, _ text: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.addButton(withTitle: "Try Again")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     @objc private func lock() { unmount(eject: false) }

@@ -3,7 +3,7 @@
 # installs it to /Applications (or ~/Applications). Usage: scripts/build.sh [--no-install]
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-0.4.0}"
+VERSION="${VERSION:-0.4.1}"
 
 swift build -c release --arch arm64
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/btrfs4mac"
